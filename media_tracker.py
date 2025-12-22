@@ -539,7 +539,7 @@ elif tab == "My Gallery":
                                 if not tmdb_id and item['Type'] not in ["Anime", "Manga", "Manhwa", "Manhua"]:
                                     tmdb_id = recover_tmdb_id(item['Title'], m_type)
                                 
-                                # Anime/Manga Links
+                                # ANIME
                                 if item['Type'] == "Anime":
                                     details = fetch_anime_details(item['Title'])
                                     if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
@@ -559,18 +559,28 @@ elif tab == "My Gallery":
                                     if not found_cr:
                                         st.link_button("🔍 Search Google", f"https://www.google.com/search?q=watch+{item['Title']}+anime")
                                 
+                                # COMICS
                                 elif item['Type'] in ["Manga", "Manhwa", "Manhua"]:
                                     st.link_button("📖 Read (Comix.to)", f"https://www.google.com/search?q=site:comix.to+{item['Title']}")
                                 
-                                # TMDB Streaming
+                                # LIVE ACTION
                                 elif item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]:
                                     trailer = get_tmdb_trailer(tmdb_id, m_type)
                                     if trailer: st.video(trailer)
                                     
+                                    # 1. Cineby (Movies/Web)
+                                    if item['Type'] in ["Movies", "Web Series"]:
+                                        cineby_url = f"https://www.google.com/search?q=site:cineby.gd+{item['Title'].replace(' ', '+')}"
+                                        st.link_button("🎬 Watch on Cineby.gd", cineby_url)
+
+                                    # 2. KissKH (Asian Dramas)
                                     if item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
+                                        kisskh_url = f"https://www.google.com/search?q=site:kisskh.ws+{item['Title'].replace(' ', '+')}"
+                                        st.link_button("🎎 Watch on KissKH", kisskh_url)
                                         st.link_button("💙 Search Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
 
-                                    if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{unique_key}"):
+                                    # 3. Official TMDB Providers
+                                    if st.button(f"📺 Official Stream in {stream_country}?", key=f"stm_{unique_key}"):
                                         provs = get_streaming_info(tmdb_id, m_type, country_code)
                                         if not provs or provs == "No Info":
                                             st.warning("Not available.")
