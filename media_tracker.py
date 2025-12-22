@@ -194,7 +194,6 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         for m in set(modes):
             country_filter = None
             if m == "MANGA":
-                # Strict Country Filter only if SINGLE type selected
                 if "Manhwa" in selected_types and "Manga" not in selected_types and "Manhua" not in selected_types:
                     country_filter = "KR" 
                 elif "Manhua" in selected_types and "Manga" not in selected_types and "Manhwa" not in selected_types:
@@ -247,7 +246,6 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres)
     })
 
 def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, country=None):
-    # Sort Mapping
     anilist_sort = "POPULARITY_DESC"
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
@@ -258,10 +256,10 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
         'sort': [anilist_sort]
     }
     
-    # Query Args (Definitions)
     query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
-    # Media Args (Usage)
-    media_args = ["type: $t", "page: $p", "sort: $sort"]
+    
+    # FIX: 'media' does NOT accept 'page'. 'Page' accepts 'page'.
+    media_args = ["type: $t", "sort: $sort"] 
     
     if query:
         query_args.append("$s: String")
@@ -278,7 +276,7 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
         media_args.append("countryOfOrigin: $c")
         variables['c'] = country
 
-    # !!! CRITICAL FIX: Ensure 'page: $p' is inside the Page() brackets !!!
+    # Construct the correct GraphQL query
     query_str = f'''
     query ({', '.join(query_args)}) {{ 
       Page(page: $p, perPage: 15) {{ 
