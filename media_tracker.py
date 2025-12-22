@@ -10,7 +10,9 @@ import time
 try:
     TMDB_API_KEY = st.secrets["tmdb_api_key"]
 except:
-    TMDB_API_KEY = "YOUR_TMDB_API_KEY_HERE"
+    # If secrets fail, we can't run.
+    st.error("CRITICAL ERROR: TMDB_API_KEY not found in secrets.")
+    st.stop()
 
 GOOGLE_SHEET_NAME = 'My Media Tracker'
 
@@ -38,23 +40,29 @@ def get_tmdb_genres():
 
 tmdb_id_map, tmdb_name_map = get_tmdb_genres()
 
-# --- GOOGLE SHEETS CONNECTION & AUTO-REPAIR ---
+# --- GOOGLE SHEETS CONNECTION (WITH DEBUGGING) ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    
+    # 1. Try to load credentials
+    creds = None
     try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    except:
-        try:
+        if "gcp_service_account" in st.secrets:
+            creds_dict = st.secrets["gcp_service_account"]
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        else:
+            # Fallback for local testing
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        except:
-            return None
-    client = gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"⚠️ Credential Error: {e}")
+        return None
+
+    # 2. Try to Connect
     try:
+        client = gspread.authorize(creds)
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
         
         # --- AUTO-REPAIR LOGIC ---
-        # 1. Check if sheet is empty
         vals = sheet.get_all_values()
         REQUIRED_HEADERS = [
             "Title", "Type", "Country", "Status", "Genres", "Image", 
@@ -62,17 +70,18 @@ def get_google_sheet():
             "Current_Ep", "Total_Eps"
         ]
         
-        # If completely empty or missing headers, write them
+        # If empty or wrong headers, fix it
         if not vals or vals[0] != REQUIRED_HEADERS:
-            # If it's empty, just append. If it has bad data, we might need to clear or insert.
-            # Safest is to insert at top if missing
             if not vals:
                 sheet.append_row(REQUIRED_HEADERS)
             elif vals[0][0] != "Title": 
                 sheet.insert_row(REQUIRED_HEADERS, 1)
                 
         return sheet
-    except:
+    except Exception as e:
+        # SHOW THE REAL ERROR
+        st.error(f"⚠️ Google Sheet Connection Failed: {e}")
+        st.info(f"Make sure you shared the sheet '{GOOGLE_SHEET_NAME}' with the client_email inside your secrets.")
         return None
 
 # --- DATABASE ACTIONS ---
@@ -80,20 +89,11 @@ def add_to_sheet(item):
     sheet = get_google_sheet()
     if sheet:
         try:
-            # Columns: Title, Type, Country, Status, Genres, Image, Overview, Rating, Backdrop, Season, Ep, Total
             row_data = [
-                item['Title'], 
-                item['Type'], 
-                item['Country'],
-                "Plan to Watch", 
-                item['Genres'], 
-                item['Image'], 
-                item['Overview'],
-                item['Rating'], 
-                item['Backdrop'], 
-                1, 
-                0, 
-                item['Total_Eps']
+                item['Title'], item['Type'], item['Country'],
+                "Plan to Watch", item['Genres'], item['Image'], 
+                item['Overview'], item['Rating'], item['Backdrop'], 
+                1, 0, item['Total_Eps']
             ]
             sheet.append_row(row_data)
             return True
@@ -108,7 +108,6 @@ def update_status_in_sheet(title, new_status, new_season, new_ep):
         try:
             cell = sheet.find(title)
             if cell:
-                # Update Status(4), Season(10), Ep(11)
                 sheet.update_cell(cell.row, 4, new_status)
                 sheet.update_cell(cell.row, 10, new_season)
                 sheet.update_cell(cell.row, 11, new_ep)
@@ -131,7 +130,7 @@ def delete_from_sheet(title):
 def search_unified(query, selected_types, selected_genres, min_rating):
     results_data = []
     
-    # 1. TMDB LOGIC
+    # TMDB
     live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -153,7 +152,6 @@ def search_unified(query, selected_types, selected_genres, min_rating):
                 try: 
                     for r in discover.discover_movies(kwargs): process_tmdb(r, "Movie", results_data, selected_types, selected_genres, min_rating)
                 except: pass
-            
             if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
                 try:
                     for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
@@ -165,7 +163,7 @@ def search_unified(query, selected_types, selected_genres, min_rating):
             if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
                 for r in search.tv_shows(query): process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
 
-    # 2. ANILIST LOGIC
+    # ANILIST
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
@@ -341,26 +339,15 @@ elif tab == "My Gallery":
     if sheet:
         # --- BULLETPROOF DATA LOADING ---
         raw_data = sheet.get_all_values()
-        
-        HEADERS = [
-            "Title", "Type", "Country", "Status", "Genres", "Image", 
-            "Overview", "Rating", "Backdrop", "Current_Season", 
-            "Current_Ep", "Total_Eps"
-        ]
+        HEADERS = ["Title", "Type", "Country", "Status", "Genres", "Image", "Overview", "Rating", "Backdrop", "Current_Season", "Current_Ep", "Total_Eps"]
         
         if len(raw_data) > 1:
-            # Assume row 0 is headers, data is row 1+
-            # We enforce strict columns to avoid crashes
             safe_rows = []
             for row in raw_data[1:]:
-                # CRITICAL FIX: Skip empty rows or rows without a Title
-                if not row or not row[0].strip():
-                    continue
-                    
-                # Pad row if short
-                if len(row) < len(HEADERS):
-                    row += [""] * (len(HEADERS) - len(row))
-                
+                # Check for empty rows
+                if not row or not row[0].strip(): continue
+                # Pad rows
+                if len(row) < len(HEADERS): row += [""] * (len(HEADERS) - len(row))
                 safe_rows.append(row[:len(HEADERS)])
             
             df = pd.DataFrame(safe_rows, columns=HEADERS)
@@ -376,9 +363,7 @@ elif tab == "My Gallery":
                 if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
                 if filter_type: df = df[df['Type'].isin(filter_type)]
                 if filter_status: df = df[df['Status'].isin(filter_status)]
-                if filter_genre:
-                    mask = df['Genres'].apply(lambda x: any(g.lower() in str(x).lower() for g in filter_genre))
-                    df = df[mask]
+                if filter_genre: mask = df['Genres'].apply(lambda x: any(g.lower() in str(x).lower() for g in filter_genre)); df = df[mask]
 
             st.divider()
             
@@ -389,11 +374,8 @@ elif tab == "My Gallery":
                     cols = st.columns(cols_per_row)
                     for idx, (_, item) in enumerate(row.iterrows()):
                         with cols[idx]:
-                            # Image Safety
                             img_url = str(item.get('Image', '')).strip()
-                            if not img_url.startswith("http"):
-                                img_url = "https://via.placeholder.com/200x300?text=No+Image"
-                            
+                            if not img_url.startswith("http"): img_url = "https://via.placeholder.com/200x300?text=No+Image"
                             st.image(img_url, use_container_width=True)
                             st.markdown(f"**{item['Title']}**")
                             
@@ -413,8 +395,7 @@ elif tab == "My Gallery":
                                     
                                     col_sea, col_ep = st.columns(2)
                                     with col_sea:
-                                        if not is_manga:
-                                            new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
+                                        if not is_manga: new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
                                         else: new_sea = 1
                                     with col_ep:
                                         label = "Chapter" if is_manga else "Episode"
@@ -422,8 +403,7 @@ elif tab == "My Gallery":
                                     
                                     if not is_manga: st.caption(f"S{new_sea}:E{new_ep}")
                                 else:
-                                    new_sea = 1
-                                    new_ep = 0
+                                    new_sea = 1; new_ep = 0
 
                                 c_sv, c_dl = st.columns([1, 1])
                                 with c_sv:
@@ -437,10 +417,9 @@ elif tab == "My Gallery":
                             
                             with st.popover("📜 Info"):
                                 bd = str(item.get('Backdrop', '')).strip()
-                                if bd.startswith("http"):
-                                    st.image(bd, use_container_width=True)
+                                if bd.startswith("http"): st.image(bd, use_container_width=True)
                                 st.write(f"Rating: {item.get('Rating')}")
                                 st.write(item.get('Overview'))
             else: st.info("No matches.")
         else: st.info("Empty Library")
-    else: st.error("Could not connect to Google Sheet.")
+    else: st.error("Connection Failed. Check Secrets.")
