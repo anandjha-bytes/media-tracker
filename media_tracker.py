@@ -10,7 +10,6 @@ import time
 try:
     TMDB_API_KEY = st.secrets["tmdb_api_key"]
 except:
-    # If secrets fail, we can't run.
     st.error("CRITICAL ERROR: TMDB_API_KEY not found in secrets.")
     st.stop()
 
@@ -40,29 +39,24 @@ def get_tmdb_genres():
 
 tmdb_id_map, tmdb_name_map = get_tmdb_genres()
 
-# --- GOOGLE SHEETS CONNECTION (WITH DEBUGGING) ---
+# --- GOOGLE SHEETS CONNECTION (WITH SAFER REPAIR) ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    
-    # 1. Try to load credentials
     creds = None
     try:
         if "gcp_service_account" in st.secrets:
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
-            # Fallback for local testing
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     except Exception as e:
-        st.error(f"⚠️ Credential Error: {e}")
         return None
 
-    # 2. Try to Connect
     try:
         client = gspread.authorize(creds)
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
         
-        # --- AUTO-REPAIR LOGIC ---
+        # --- SAFER AUTO-REPAIR LOGIC ---
         vals = sheet.get_all_values()
         REQUIRED_HEADERS = [
             "Title", "Type", "Country", "Status", "Genres", "Image", 
@@ -70,18 +64,26 @@ def get_google_sheet():
             "Current_Ep", "Total_Eps"
         ]
         
-        # If empty or wrong headers, fix it
-        if not vals or vals[0] != REQUIRED_HEADERS:
-            if not vals:
+        # Check if sheet is effectively empty or missing headers
+        is_empty = not vals
+        has_wrong_headers = False
+        
+        if not is_empty:
+            first_row = vals[0]
+            # Check if first row is empty or doesn't match
+            if not first_row or first_row != REQUIRED_HEADERS:
+                has_wrong_headers = True
+        
+        if is_empty or has_wrong_headers:
+            if is_empty:
                 sheet.append_row(REQUIRED_HEADERS)
-            elif vals[0][0] != "Title": 
+            else:
                 sheet.insert_row(REQUIRED_HEADERS, 1)
                 
         return sheet
     except Exception as e:
-        # SHOW THE REAL ERROR
-        st.error(f"⚠️ Google Sheet Connection Failed: {e}")
-        st.info(f"Make sure you shared the sheet '{GOOGLE_SHEET_NAME}' with the client_email inside your secrets.")
+        st.error(f"Google Sheet Connection Failed: {e}")
+        st.info("Make sure you shared the sheet 'My Media Tracker' with the client_email inside your secrets.")
         return None
 
 # --- DATABASE ACTIONS ---
@@ -337,16 +339,16 @@ elif tab == "My Gallery":
     if st.button("🔄 Refresh"): st.cache_data.clear()
     
     if sheet:
-        # --- BULLETPROOF DATA LOADING ---
+        # --- SAFE LOAD ---
         raw_data = sheet.get_all_values()
         HEADERS = ["Title", "Type", "Country", "Status", "Genres", "Image", "Overview", "Rating", "Backdrop", "Current_Season", "Current_Ep", "Total_Eps"]
         
         if len(raw_data) > 1:
             safe_rows = []
             for row in raw_data[1:]:
-                # Check for empty rows
+                # SKIP EMPTY ROWS
                 if not row or not row[0].strip(): continue
-                # Pad rows
+                # PAD ROWS
                 if len(row) < len(HEADERS): row += [""] * (len(HEADERS) - len(row))
                 safe_rows.append(row[:len(HEADERS)])
             
