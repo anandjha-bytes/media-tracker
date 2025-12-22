@@ -513,8 +513,8 @@ elif tab == "My Gallery":
             st.divider()
             
             if not df.empty:
-                # CHANGED: 6 Columns per Row
-                cols_per_row = 6
+                # CHANGED: 5 Columns per Row
+                cols_per_row = 5
                 rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
                 for row_chunk in rows:
                     cols = st.columns(cols_per_row)
@@ -536,7 +536,7 @@ elif tab == "My Gallery":
                             
                             unique_key = f"{index}"
                             
-                            # ORDER SWAP: Streaming First, then Manage
+                            # SWAPPED: Overview First
                             with st.popover("📜 Overview & Streaming"):
                                 # TRAILER
                                 tmdb_id = item.get('ID')
@@ -594,6 +594,7 @@ elif tab == "My Gallery":
                                 st.write(f"**Rating:** {item.get('Rating')}")
                                 st.write(item.get('Overview'))
 
+                            # SWAPPED: Manage Second
                             with st.expander("⚙️ Manage"):
                                 opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
                                 curr = item.get('Status', 'Plan to Watch')
