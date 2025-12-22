@@ -1,635 +1,235 @@
-import streamlit as st
-import pandas as pd
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from tmdbv3api import TMDb, Movie, TV, Search, Genre, Discover
-import requests
-import time
+import os
+import hashlib
 import urllib.parse
+import requests
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from authlib.integrations.flask_client import OAuth
+from tmdbv3api import TMDb, Search, Movie, TV, Discover
 
-# --- CONFIGURATION ---
-try:
-    TMDB_API_KEY = st.secrets["tmdb_api_key"]
-except:
-    st.error("CRITICAL ERROR: TMDB_API_KEY not found in secrets.")
-    st.stop()
+app = Flask(__name__)
+app.secret_key = "CHANGE_ME_TO_SOMETHING_SECRET"
 
-GOOGLE_SHEET_NAME = 'My Media Tracker'
+# --- DATABASE CONFIG ---
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///media.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 
-# --- SETUP APIS ---
+# --- GOOGLE AUTH CONFIG ---
+# (Keep your previous Client ID/Secret here if you have them)
+app.config['GOOGLE_CLIENT_ID'] = 'YOUR_GOOGLE_CLIENT_ID'
+app.config['GOOGLE_CLIENT_SECRET'] = 'YOUR_GOOGLE_CLIENT_SECRET'
+
+oauth = OAuth(app)
+google = oauth.register(
+    name='google',
+    client_id=app.config['GOOGLE_CLIENT_ID'],
+    client_secret=app.config['GOOGLE_CLIENT_SECRET'],
+    access_token_url='https://accounts.google.com/o/oauth2/token',
+    authorize_url='https://accounts.google.com/o/oauth2/auth',
+    api_base_url='https://www.googleapis.com/oauth2/v1/',
+    client_kwargs={'scope': 'openid email profile'},
+)
+
+# --- TMDB SETUP ---
 tmdb = TMDb()
-tmdb.api_key = TMDB_API_KEY
+tmdb.api_key = "YOUR_TMDB_API_KEY_HERE"  # <--- PASTE API KEY
 tmdb.language = 'en'
 tmdb_poster_base = "https://image.tmdb.org/t/p/w400"
-tmdb_backdrop_base = "https://image.tmdb.org/t/p/w780"
 
-# --- GENRE MAP (HARDCODED FOR STABILITY) ---
-# This ensures the genre filter NEVER fails even if the API is down.
-GENRE_MAP = {
-    "Action": 28, "Adventure": 12, "Animation": 16, "Comedy": 35,
-    "Crime": 80, "Documentary": 99, "Drama": 18, "Family": 10751,
-    "Fantasy": 14, "History": 36, "Horror": 27, "Music": 10402,
-    "Mystery": 9648, "Romance": 10749, "Sci-Fi": 878, "TV Movie": 10770,
-    "Thriller": 53, "War": 10752, "Western": 37,
-    "Action & Adventure": 10759, "Sci-Fi & Fantasy": 10765, "War & Politics": 10768
-}
-# Inverse map for display
-ID_TO_GENRE = {v: k for k, v in GENRE_MAP.items()}
+# --- MODELS ---
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), nullable=True)
+    email = db.Column(db.String(150), unique=True, nullable=False)
+    password = db.Column(db.String(150), nullable=True)
+    auth_type = db.Column(db.String(50), default="local")
 
-# --- CACHE COUNTRIES ---
-@st.cache_data
-def get_tmdb_countries():
-    try:
-        url = f"https://api.themoviedb.org/3/configuration/countries?api_key={TMDB_API_KEY}"
-        resp = requests.get(url).json()
-        countries = {c['english_name']: c['iso_3166_1'] for c in resp}
-        return dict(sorted(countries.items()))
-    except:
-        return {'United States': 'US', 'India': 'IN', 'United Kingdom': 'GB'}
+class Media(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    title = db.Column(db.String(200))
+    media_type = db.Column(db.String(50))
+    image = db.Column(db.String(500))
+    status = db.Column(db.String(50), default="Plan to Watch")
+    overview = db.Column(db.Text)
+    rating = db.Column(db.String(20))
 
-tmdb_countries = get_tmdb_countries()
+with app.app_context():
+    db.create_all()
 
-# --- GOOGLE SHEETS CONNECTION ---
-def get_google_sheet():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = None
-    try:
-        if "gcp_service_account" in st.secrets:
-            creds_dict = st.secrets["gcp_service_account"]
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        else:
-            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    except: return None
+# --- HELPERS ---
+def get_gravatar(email):
+    hash_val = hashlib.md5(email.lower().strip().encode('utf-8')).hexdigest()
+    return f"https://www.gravatar.com/avatar/{hash_val}?d=identicon&s=200"
 
-    try:
-        client = gspread.authorize(creds)
-        sheet = client.open(GOOGLE_SHEET_NAME).sheet1
+# --- SEARCH LOGIC (THE "WEB SERIES" UPDATE) ---
+def search_unified(query):
+    results = []
+    
+    # 1. TMDB (Movies / Web Series / Dramas)
+    if query:
+        search = Search()
+        movies = search.movies(query)
+        tv = search.tv_shows(query)
         
-        vals = sheet.get_all_values()
-        REQUIRED_HEADERS = [
-            "Title", "Type", "Country", "Status", "Genres", "Image", 
-            "Overview", "Rating", "Backdrop", "Current_Season", 
-            "Current_Ep", "Total_Eps", "Total_Seasons", "ID"
-        ]
+        # Process Movies
+        for m in movies:
+            if hasattr(m, 'poster_path') and m.poster_path:
+                results.append({
+                    'title': m.title,
+                    'type': 'Movies',
+                    'image': tmdb_poster_base + m.poster_path,
+                    'overview': m.overview,
+                    'rating': getattr(m, 'vote_average', 0)
+                })
         
-        if not vals:
-            sheet.append_row(REQUIRED_HEADERS)
-        elif vals[0] != REQUIRED_HEADERS:
-            if len(vals[0]) < len(REQUIRED_HEADERS):
-                 sheet.resize(cols=len(REQUIRED_HEADERS))
-                 for i, header in enumerate(REQUIRED_HEADERS):
-                     sheet.update_cell(1, i+1, header)
+        # Process TV (The Logic Update!)
+        for t in tv:
+            if hasattr(t, 'poster_path') and t.poster_path:
+                origin = getattr(t, 'original_language', 'en')
+                detected = "Web Series" # Default to Web Series if not Asian
                 
-        return sheet
-    except Exception as e:
-        return None
+                # Language Logic
+                if origin == 'ko': detected = "K-Drama"
+                elif origin == 'zh': detected = "C-Drama"
+                elif origin == 'th': detected = "Thai Drama"
+                elif origin == 'ja': detected = "Anime"
+                elif origin == 'en': detected = "Web Series" # Explicit English Drama
+                
+                results.append({
+                    'title': t.name,
+                    'type': detected,
+                    'image': tmdb_poster_base + t.poster_path,
+                    'overview': t.overview,
+                    'rating': getattr(t, 'vote_average', 0)
+                })
 
-# --- DATABASE ACTIONS ---
-def fetch_details_and_add(item):
-    sheet = get_google_sheet()
-    if not sheet: return False
-    
-    total_seasons = 1
-    total_eps = item['Total_Eps']
-    media_id = item.get('ID') 
-    
-    if item['Type'] not in ["Movies", "Anime", "Manga", "Manhwa", "Manhua"] and media_id:
-        try:
-            tv_api = TV()
-            details = tv_api.details(media_id)
-            total_seasons = getattr(details, 'number_of_seasons', 1)
-            total_eps = getattr(details, 'number_of_episodes', "?")
-        except: pass
-
-    try:
-        row_data = [
-            item['Title'], item['Type'], item['Country'],
-            "Plan to Watch", item['Genres'], item['Image'], 
-            item['Overview'], item['Rating'], item['Backdrop'], 
-            1, 0, total_eps, total_seasons, media_id
-        ]
-        sheet.append_row(row_data)
-        return True
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return False
-
-def update_status_in_sheet(title, new_status, new_season, new_ep):
-    sheet = get_google_sheet()
-    if sheet:
-        try:
-            cell = sheet.find(title)
-            if cell:
-                sheet.update_cell(cell.row, 4, new_status)
-                sheet.update_cell(cell.row, 10, new_season)
-                sheet.update_cell(cell.row, 11, new_ep)
-                st.toast(f"✅ Saved: {title}")
-                time.sleep(0.5)
-        except: pass
-
-def delete_from_sheet(title):
-    sheet = get_google_sheet()
-    if sheet:
-        try:
-            cell = sheet.find(title)
-            if cell:
-                sheet.delete_rows(cell.row)
-                st.toast(f"🗑️ Deleted: {title}")
-                time.sleep(0.5)
-        except: pass
-
-# --- HELPERS: LINKS & TRAILERS ---
-def generate_provider_link(provider_name, title):
-    q = urllib.parse.quote(title)
-    p = provider_name.lower()
-    
-    if 'netflix' in p: return f"https://www.netflix.com/search?q={q}"
-    if 'disney' in p: return f"https://www.disneyplus.com/search?q={q}"
-    if 'amazon' in p or 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
-    if 'hulu' in p: return f"https://www.hulu.com/search?q={q}"
-    if 'apple' in p: return f"https://tv.apple.com/search?term={q}"
-    if 'hbo' in p or 'max' in p: return f"https://www.max.com/search?q={q}"
-    if 'google' in p or 'play' in p: return f"https://play.google.com/store/search?q={q}&c=movies"
-    if 'youtube' in p: return f"https://www.youtube.com/results?search_query={q}"
-    if 'crunchyroll' in p: return f"https://www.crunchyroll.com/search?q={q}"
-    if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
-    if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
-    if 'sony' in p or 'liv' in p: return f"https://www.sonyliv.com/search?q={q}"
-    if 'zee5' in p: return f"https://www.zee5.com/search?q={q}"
-    if 'viki' in p or 'rakuten' in p: return f"https://www.viki.com/search?q={q}"
-    
-    return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
-
-def recover_tmdb_id(title, media_type):
-    search = Search()
-    try:
-        if media_type == 'movie': results = search.movies(title)
-        else: results = search.tv_shows(title)
-        if results: return results[0].id
-    except: return None
-    return None
-
-def get_streaming_info(tmdb_id, media_type, country_code):
-    if not tmdb_id: return None
-    try: clean_id = int(float(tmdb_id))
-    except: return None
-
-    url = f"https://api.themoviedb.org/3/{media_type}/{clean_id}/watch/providers?api_key={TMDB_API_KEY}"
-    try:
-        r = requests.get(url)
-        data = r.json()
-        if 'results' in data and country_code in data['results']:
-            return data['results'][country_code]
-        else: return "No Info"
-    except: return None
-
-def fetch_anime_details(title):
-    query = '''
-    query ($s: String) {
-        Page(perPage: 1) {
-            media(search: $s, type: ANIME) {
-                trailer { id site }
-                externalLinks { site url }
+    # 2. AniList (Anime/Manga)
+    if query:
+        q_graphql = '''
+        query ($s: String) {
+            Page(perPage: 10) {
+                media(search: $s, sort: POPULARITY_DESC) {
+                    title { english romaji }
+                    type
+                    countryOfOrigin
+                    coverImage { large }
+                    description
+                    averageScore
+                }
             }
         }
-    }
-    '''
-    try:
-        r = requests.post('https://graphql.anilist.co', json={'query': query, 'variables': {'s': title}})
-        data = r.json()
-        if data['data']['Page']['media']:
-            return data['data']['Page']['media'][0]
-    except: pass
-    return {}
+        '''
+        try:
+            r = requests.post('https://graphql.anilist.co', json={'query': q_graphql, 'variables': {'s': query}})
+            data = r.json()['data']['Page']['media']
+            for item in data:
+                m_type = item['type']
+                origin = item['countryOfOrigin']
+                detected = "Anime"
+                
+                if m_type == "MANGA":
+                    if origin == "KR": detected = "Manhwa"
+                    elif origin == "CN": detected = "Manhua"
+                    else: detected = "Manga"
+                
+                title = item['title']['english'] if item['title']['english'] else item['title']['romaji']
+                
+                results.append({
+                    'title': title,
+                    'type': detected,
+                    'image': item['coverImage']['large'],
+                    'overview': item['description'].replace('<br>', '') if item['description'] else "No desc",
+                    'rating': (item['averageScore'] / 10) if item['averageScore'] else 0
+                })
+        except: pass
 
-def get_tmdb_trailer(tmdb_id, media_type):
-    if not tmdb_id: return None
-    try:
-        clean_id = int(float(tmdb_id))
-        url = f"https://api.themoviedb.org/3/{media_type}/{clean_id}/videos?api_key={TMDB_API_KEY}"
-        r = requests.get(url)
-        data = r.json()
-        if 'results' in data:
-            for vid in data['results']:
-                if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
-                    return f"https://www.youtube.com/watch?v={vid['key']}"
-            for vid in data['results']:
-                if vid['site'] == 'YouTube':
-                    return f"https://www.youtube.com/watch?v={vid['key']}"
-    except: return None
-    return None
+    return results
 
-# --- SEARCH ENGINE ---
-def search_unified(query, selected_types, selected_genres, sort_option, page=1):
-    results_data = []
+# --- ROUTES ---
+
+@app.route('/')
+def home():
+    if 'user_id' in session: return redirect(url_for('dashboard'))
+    return render_template('login.html')
+
+@app.route('/login', methods=['POST'])
+def login():
+    email = request.form['email']
+    user = User.query.filter_by(email=email).first()
+    if user and check_password_hash(user.password, request.form['password']):
+        session['user_id'] = user.id
+        session['email'] = user.email
+        session['username'] = user.username
+        return redirect(url_for('dashboard'))
+    flash("Invalid credentials")
+    return redirect(url_for('home'))
+
+@app.route('/register', methods=['POST'])
+def register():
+    try:
+        pw_hash = generate_password_hash(request.form['password'], method='pbkdf2:sha256')
+        user = User(username=request.form['username'], email=request.form['email'], password=pw_hash)
+        db.session.add(user)
+        db.session.commit()
+        flash("Account created!")
+    except:
+        flash("Email already exists")
+    return redirect(url_for('home'))
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session: return redirect(url_for('home'))
+    media = Media.query.filter_by(user_id=session['user_id']).all()
+    avatar = get_gravatar(session['email'])
+    return render_template('dashboard.html', media=media, user=session['username'], avatar=avatar)
+
+@app.route('/search', methods=['GET', 'POST'])
+def search():
+    if 'user_id' not in session: return redirect(url_for('home'))
+    results = []
+    filter_type = request.form.get('filter_type') # Get dropdown selection
     
-    # 1. TMDB (Movies, TV, Dramas)
-    live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
-    if any(t in selected_types for t in live_action):
-        lang = None
-        if "K-Drama" in selected_types and len(selected_types) == 1: lang = "ko"
-        elif "C-Drama" in selected_types and len(selected_types) == 1: lang = "zh"
-        elif "Thai Drama" in selected_types and len(selected_types) == 1: lang = "th"
-
-        g_ids = ""
-        if selected_genres:
-            # FIX: Use hardcoded map and join with OR pipe '|' for broader results
-            ids = [str(GENRE_MAP.get(g)) for g in selected_genres if GENRE_MAP.get(g)]
-            g_ids = "|".join(ids)
-
-        tmdb_sort = 'popularity.desc'
-        if sort_option == 'Top Rated': tmdb_sort = 'vote_average.desc'
-
-        if not query:
-            discover = Discover()
-            kwargs = {'sort_by': tmdb_sort, 'with_genres': g_ids, 'page': page, 'vote_count.gte': 10}
-            if lang: kwargs['with_original_language'] = lang
-
-            if "Movies" in selected_types:
-                try: 
-                    for r in discover.discover_movies(kwargs): process_tmdb(r, "Movie", results_data, selected_types, selected_genres)
-                except: pass
-            if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
-                try:
-                    for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres)
-                except: pass
+    if request.method == 'POST' and request.form.get('query'):
+        all_results = search_unified(request.form['query'])
+        
+        # Apply the Dropdown Filter Logic
+        if filter_type and filter_type != "All":
+            results = [x for x in all_results if x['type'] == filter_type]
         else:
-            search = Search()
-            current_results = []
-            if "Movies" in selected_types:
-                try:
-                    for r in search.movies(query, page=page): process_tmdb(r, "Movie", current_results, selected_types, selected_genres)
-                except: pass
-            if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
-                try:
-                    for r in search.tv_shows(query, page=page): process_tmdb(r, "TV", current_results, selected_types, selected_genres)
-                except: pass
+            results = all_results
             
-            if sort_option == "Top Rated":
-                current_results.sort(key=lambda x: float(x['Rating'].split('/')[0]), reverse=True)
-            results_data.extend(current_results)
+    return render_template('search.html', results=results, avatar=get_gravatar(session['email']))
 
-    # 2. ANILIST (Anime, Manga)
-    asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
-    if any(t in selected_types for t in asian_comics):
-        modes = []
-        if "Anime" in selected_types: modes.append("ANIME")
-        if any(t in ["Manga", "Manhwa", "Manhua"] for t in selected_types): modes.append("MANGA")
-        
-        for m in set(modes):
-            country_filter = None
-            if m == "MANGA":
-                if "Manhwa" in selected_types and "Manga" not in selected_types and "Manhua" not in selected_types: country_filter = "KR" 
-                elif "Manhua" in selected_types and "Manga" not in selected_types and "Manhwa" not in selected_types: country_filter = "CN" 
-                elif "Manga" in selected_types and "Manhwa" not in selected_types and "Manhua" not in selected_types: country_filter = "JP" 
+@app.route('/add', methods=['POST'])
+def add():
+    if 'user_id' not in session: return redirect(url_for('home'))
+    new_m = Media(
+        user_id=session['user_id'],
+        title=request.form['title'],
+        media_type=request.form['type'],
+        image=request.form['image'],
+        overview=request.form['overview'],
+        rating=request.form['rating']
+    )
+    db.session.add(new_m)
+    db.session.commit()
+    return redirect(url_for('dashboard'))
 
-            q_val = query if query else None 
-            for r in fetch_anilist(q_val, m, selected_genres, sort_option, page, country_filter): 
-                process_anilist(r, m, results_data, selected_types, selected_genres)
+@app.route('/delete/<int:id>')
+def delete(id):
+    m = Media.query.get(id)
+    if m and m.user_id == session['user_id']:
+        db.session.delete(m)
+        db.session.commit()
+    return redirect(url_for('dashboard'))
 
-    return results_data
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('home'))
 
-def process_tmdb(res, media_kind, results_list, selected_types, selected_genres):
-    origin = getattr(res, 'original_language', 'en')
-    detected_type = "Movies" if media_kind == "Movie" else "Western Series"
-    country_disp = "Western"
-    
-    if media_kind == "TV":
-        if origin == 'ko': detected_type, country_disp = "K-Drama", "South Korea"
-        elif origin == 'zh': detected_type, country_disp = "C-Drama", "China"
-        elif origin == 'th': detected_type, country_disp = "Thai Drama", "Thailand"
-        elif origin == 'ja': detected_type, country_disp = "J-Drama", "Japan"
-    
-    if detected_type not in selected_types: return
-    
-    rating = getattr(res, 'vote_average', 0)
-    genre_ids = getattr(res, 'genre_ids', [])
-    res_genres = [ID_TO_GENRE.get(gid, "Unknown") for gid in genre_ids]
-    
-    # PERMISSIVE FILTER: If any selected genre matches any result genre
-    if selected_genres:
-        if not any(g in res_genres for g in selected_genres): return
-
-    poster = getattr(res, 'poster_path', None)
-    img_url = f"{tmdb_poster_base}{poster}" if poster else ""
-    
-    results_list.append({
-        "Title": getattr(res, 'title', getattr(res, 'name', 'Unknown')),
-        "Type": detected_type,
-        "Country": country_disp,
-        "Genres": ", ".join(res_genres),
-        "Image": img_url,
-        "Overview": getattr(res, 'overview', 'No overview.'),
-        "Rating": f"{rating}/10",
-        "Backdrop": f"{tmdb_backdrop_base}{getattr(res, 'backdrop_path', '')}",
-        "Total_Eps": "?", 
-        "ID": getattr(res, 'id', None)
-    })
-
-def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, country=None):
-    anilist_sort = "POPULARITY_DESC"
-    if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
-    elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
-    
-    variables = {'t': type_, 'p': page, 'sort': [anilist_sort]}
-    query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
-    media_args = ["type: $t", "sort: $sort"]
-    
-    if query:
-        query_args.append("$s: String")
-        media_args.append("search: $s")
-        variables['s'] = query
-    if genres:
-        query_args.append("$g: [String]")
-        media_args.append("genre_in: $g")
-        variables['g'] = genres
-    if country:
-        query_args.append("$c: CountryCode")
-        media_args.append("countryOfOrigin: $c")
-        variables['c'] = country
-
-    query_str = f'''
-    query ({', '.join(query_args)}) {{ 
-      Page(page: $p, perPage: 15) {{ 
-        media({', '.join(media_args)}) {{ 
-          title {{ romaji english }} coverImage {{ large }} bannerImage genres countryOfOrigin type description averageScore episodes chapters 
-          externalLinks {{ site url }}
-        }} 
-      }} 
-    }}
-    '''
-    try:
-        r = requests.post('https://graphql.anilist.co', json={'query': query_str, 'variables': variables})
-        if r.status_code == 200: return r.json()['data']['Page']['media']
-        else: return []
-    except: return []
-
-def process_anilist(res, api_type, results_list, selected_types, selected_genres):
-    origin = res.get('countryOfOrigin', 'JP')
-    detected_type = "Anime"
-    country_disp = "Japan"
-    total = res.get('episodes') if api_type == "ANIME" else res.get('chapters')
-    if not total: total = "?"
-
-    if api_type == "MANGA":
-        if origin == 'KR': detected_type, country_disp = "Manhwa", "South Korea"
-        elif origin == 'CN': detected_type, country_disp = "Manhua", "China"
-        else: detected_type = "Manga"
-    
-    if detected_type not in selected_types: return
-    
-    score = res.get('averageScore', 0)
-    rating_val = score / 10 if score else 0
-
-    res_genres = res.get('genres', [])
-    if selected_genres:
-        # Permissive check for string matches
-        if not any(g in res_genres for g in selected_genres): return
-
-    import re
-    raw = res.get('description', '')
-    clean = re.sub('<[^<]+?>', '', raw) if raw else "No description."
-
-    results_list.append({
-        "Title": res['title']['english'] if res['title']['english'] else res['title']['romaji'],
-        "Type": detected_type,
-        "Country": country_disp,
-        "Genres": ", ".join(res_genres),
-        "Image": res.get('coverImage', {}).get('large', ''),
-        "Overview": clean,
-        "Rating": f"{rating_val}/10",
-        "Backdrop": res.get('bannerImage', ''),
-        "Total_Eps": total,
-        "ID": None,
-        "Links": res.get('externalLinks', [])
-    })
-
-# --- UI START ---
-st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
-st.title("🎬 Ultimate Media Tracker")
-
-sheet = get_google_sheet()
-if "refresh_key" not in st.session_state: st.session_state.refresh_key = 0
-
-if 'search_results' not in st.session_state: st.session_state.search_results = []
-if 'search_page' not in st.session_state: st.session_state.search_page = 1
-
-tab = st.sidebar.radio("Menu", ["My Gallery", "Search & Add"], key="main_nav")
-GENRES = list(GENRE_MAP.keys()) # Use hardcoded keys
-
-# --- SEARCH TAB ---
-if tab == "Search & Add":
-    st.subheader("Global Database Search")
-    
-    with st.expander("🔎 Filter Options", expanded=True):
-        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-        with c1: search_query = st.text_input("Title (Optional)", placeholder="Leave empty to discover...")
-        with c2: selected_types = st.multiselect("Type", ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Manga", "Manhwa", "Manhua"], default=["Movies"])
-        with c3: selected_genres = st.multiselect("Genre", GENRES)
-        with c4: sort_option = st.selectbox("Sort By", ["Popularity", "Relevance", "Top Rated"])
-        
-        if st.button("🚀 Search / Discover"):
-            st.session_state.search_page = 1
-            st.session_state.search_results = []
-            with st.spinner("Fetching..."):
-                if not selected_types: selected_types = ["Movies"]
-                results = search_unified(search_query, selected_types, selected_genres, sort_option, page=1)
-                st.session_state.search_results = results
-            
-            if not st.session_state.search_results: st.warning("No results found.")
-
-    if st.session_state.search_results:
-        for idx, item in enumerate(st.session_state.search_results):
-            with st.container():
-                col_img, col_txt = st.columns([1, 6])
-                with col_img:
-                    if item['Image']: st.image(item['Image'], use_container_width=True)
-                with col_txt:
-                    st.subheader(item['Title'])
-                    st.caption(f"**{item['Type']}** | ⭐ {item['Rating']} | {item['Country']}")
-                    st.caption(f"🏷️ {item['Genres']}")
-                    st.write(item['Overview'][:250] + "...")
-                    
-                    if st.button(f"➕ Add Library", key=f"add_{item['Title']}_{idx}"):
-                        with st.spinner("Fetching details..."):
-                            success = fetch_details_and_add(item)
-                        if success: st.toast(f"✅ Saved: {item['Title']}")
-                        else: st.toast("❌ Error saving.")
-            st.divider()
-
-        if st.button("⬇️ Load More Results"):
-            st.session_state.search_page += 1
-            with st.spinner(f"Loading Page {st.session_state.search_page}..."):
-                new_results = search_unified(search_query, selected_types, selected_genres, sort_option, page=st.session_state.search_page)
-                st.session_state.search_results.extend(new_results)
-                st.rerun()
-
-# --- GALLERY TAB ---
-elif tab == "My Gallery":
-    st.subheader("My Library")
-    if st.button("🔄 Refresh"): st.cache_data.clear()
-    
-    if sheet:
-        raw_data = sheet.get_all_values()
-        HEADERS = ["Title", "Type", "Country", "Status", "Genres", "Image", "Overview", "Rating", "Backdrop", "Current_Season", "Current_Ep", "Total_Eps", "Total_Seasons", "ID"]
-        
-        if len(raw_data) > 1:
-            safe_rows = []
-            for row in raw_data[1:]:
-                if not row or not row[0].strip(): continue
-                if len(row) < len(HEADERS): row += [""] * (len(HEADERS) - len(row))
-                safe_rows.append(row[:len(HEADERS)])
-            
-            df = pd.DataFrame(safe_rows, columns=HEADERS)
-            
-            with st.expander("Filter Collection", expanded=False):
-                c_sel, c_txt, c_type, c_gen = st.columns([2, 2, 2, 2])
-                with c_sel:
-                    default_idx = list(tmdb_countries.keys()).index("India") if "India" in tmdb_countries else 0
-                    stream_country = st.selectbox("🌎 Select Country for Streaming", list(tmdb_countries.keys()), index=default_idx)
-                    country_code = tmdb_countries[stream_country]
-                with c_txt: filter_text = st.text_input("Search Title")
-                with c_type: filter_type = st.multiselect("Filter Type", df['Type'].unique() if not df.empty else [])
-                with c_gen: filter_genre = st.multiselect("Filter Genre", GENRES)
-            
-            if not df.empty:
-                if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
-                if filter_type: df = df[df['Type'].isin(filter_type)]
-                if filter_genre: mask = df['Genres'].apply(lambda x: any(g.lower() in str(x).lower() for g in filter_genre)); df = df[mask]
-
-            st.divider()
-            
-            if not df.empty:
-                cols_per_row = 4
-                rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
-                for row in rows:
-                    cols = st.columns(cols_per_row)
-                    for idx, (_, item) in enumerate(row.iterrows()):
-                        with cols[idx]:
-                            img_url = str(item.get('Image', '')).strip()
-                            if not img_url.startswith("http"): img_url = "https://via.placeholder.com/200x300?text=No+Image"
-                            st.image(img_url, use_container_width=True)
-                            st.markdown(f"**{item['Title']}**")
-                            
-                            with st.expander("⚙️ Manage"):
-                                opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
-                                curr = item.get('Status', 'Plan to Watch')
-                                if curr not in opts: curr = "Plan to Watch"
-                                new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}_{idx}", index=opts.index(curr))
-                                
-                                if item['Type'] != "Movies":
-                                    try: c_sea = int(item.get('Current_Season', 1))
-                                    except: c_sea = 1
-                                    try: c_ep = int(item.get('Current_Ep', 0))
-                                    except: c_ep = 0
-                                    
-                                    tot_eps = item.get('Total_Eps', '?')
-                                    tot_sea = item.get('Total_Seasons', '?')
-                                    is_manga = "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']
-                                    
-                                    col_sea, col_ep = st.columns(2)
-                                    with col_sea:
-                                        if not is_manga:
-                                            new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
-                                            st.caption(f"Total: {tot_sea}")
-                                        else: new_sea = 1
-                                    with col_ep:
-                                        label = "Chapter" if is_manga else "Episode"
-                                        new_ep = st.number_input(f"{label}:", min_value=0, value=c_ep, step=1, key=f"ep_{item['Title']}_{idx}")
-                                        st.caption(f"Total: {tot_eps}")
-                                else:
-                                    new_sea = 1; new_ep = 0
-
-                                c_sv, c_dl = st.columns([1, 1])
-                                with c_sv:
-                                    if st.button("💾 Save", key=f"sv_{item['Title']}_{idx}"):
-                                        update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
-                                        st.rerun()
-                                with c_dl:
-                                    if st.button("🗑️ Del", key=f"dl_{item['Title']}_{idx}"):
-                                        delete_from_sheet(item['Title'])
-                                        st.rerun()
-                            
-                            with st.popover("📜 Info & Streaming"):
-                                # TRAILER / BACKDROP LOGIC
-                                has_trailer = False
-                                
-                                if item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
-                                    tmdb_id = item.get('ID')
-                                    m_type = 'movie' if item['Type'] == "Movies" else 'tv'
-                                    if not tmdb_id: tmdb_id = recover_tmdb_id(item['Title'], m_type)
-                                    trailer_url = get_tmdb_trailer(tmdb_id, m_type)
-                                    if trailer_url:
-                                        st.video(trailer_url)
-                                        has_trailer = True
-                                elif item['Type'] == "Anime":
-                                    details = fetch_anime_details(item['Title'])
-                                    if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
-                                        st.video(f"https://www.youtube.com/watch?v={details['trailer']['id']}")
-                                        has_trailer = True
-
-                                if not has_trailer:
-                                    bd = str(item.get('Backdrop', '')).strip()
-                                    if bd.startswith("http"): st.image(bd, use_container_width=True)
-                                
-                                # MANGA
-                                if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
-                                    search_url = f"https://www.google.com/search?q=site:comix.to+{item['Title'].replace(' ', '+')}"
-                                    st.link_button("📖 Read on Comix.to", search_url)
-                                
-                                # ASIAN DRAMA (VIKI)
-                                elif item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
-                                    viki_url = f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}"
-                                    st.link_button("💙 Search on Viki", viki_url)
-
-                                # ANIME
-                                elif item['Type'] == "Anime":
-                                    st.write(f"**Streaming:**")
-                                    details = fetch_anime_details(item['Title'])
-                                    links = details.get('externalLinks', [])
-                                    has_crunchyroll = False
-                                    if links:
-                                        for link in links:
-                                            if 'crunchyroll' in link['site'].lower():
-                                                has_crunchyroll = True
-                                                st.link_button(f"🟠 {link['site']}", link['url'])
-                                            else:
-                                                st.link_button(f"🔗 {link['site']}", link['url'])
-                                    if not has_crunchyroll:
-                                        g_search = f"https://www.google.com/search?q=watch+{item['Title'].replace(' ', '+')}+anime+online"
-                                        st.link_button("🔍 Search Google (Crunchyroll Not Found)", g_search)
-
-                                # MOVIES / TV STREAMING
-                                if item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
-                                    if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{item['Title']}_{idx}"):
-                                        tmdb_id = item.get('ID')
-                                        m_type = 'movie' if item['Type'] == "Movies" else 'tv'
-                                        if not tmdb_id: tmdb_id = recover_tmdb_id(item['Title'], m_type)
-                                        
-                                        provs = get_streaming_info(tmdb_id, m_type, country_code)
-                                        
-                                        if not provs or provs == "No Info":
-                                            st.warning(f"Not available to stream in {stream_country}.")
-                                            g_search = f"https://www.google.com/search?q=watch+{item['Title'].replace(' ', '+')}+online"
-                                            st.link_button("🔍 Search Google", g_search)
-                                        else:
-                                            def show_links(cat, provs, icon):
-                                                if provs:
-                                                    st.write(f"{icon} **{cat}:**")
-                                                    for p in provs:
-                                                        p_name = p['provider_name']
-                                                        p_link = generate_provider_link(p_name, item['Title'])
-                                                        st.markdown(f"- [{p_name}]({p_link})")
-                                            
-                                            show_links("Stream", provs.get('flatrate'), "🟢")
-                                            show_links("Rent", provs.get('rent'), "🟡")
-                                            show_links("Buy", provs.get('buy'), "🔵")
-                                            
-                                            if 'flatrate' not in provs and 'rent' not in provs and 'buy' not in provs:
-                                                st.info("No direct streaming options found.")
-
-                                st.write(f"**Rating:** {item.get('Rating')}")
-                                st.write(item.get('Overview'))
-            else: st.info("No matches.")
-        else: st.info("Empty Library")
-    else: st.error("Connection Failed. Check Secrets.")
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
