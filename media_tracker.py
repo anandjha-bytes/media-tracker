@@ -15,9 +15,7 @@ st.title("🎬 Ultimate Media Tracker")
 try:
     TMDB_API_KEY = st.secrets["tmdb_api_key"]
 except:
-    # Use fallback or raise error if crucial
-    st.error("Secrets not found. Please set up .streamlit/secrets.toml")
-    st.stop()
+    TMDB_API_KEY = "YOUR_TMDB_API_KEY_HERE"
 
 GOOGLE_SHEET_NAME = 'My Media Tracker'
 
@@ -68,7 +66,6 @@ def get_google_sheet():
         client = gspread.authorize(creds)
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
         
-        # Auto-repair headers
         vals = sheet.get_all_values()
         REQUIRED_HEADERS = [
             "Title", "Type", "Country", "Status", "Genres", "Image", 
@@ -89,34 +86,20 @@ def get_google_sheet():
         return None
 
 # --- DATABASE ACTIONS ---
-def fetch_details_and_add(item):
+def add_to_sheet(item):
     sheet = get_google_sheet()
-    if not sheet: return False
-    
-    total_seasons = 1
-    total_eps = item['Total_Eps']
-    media_id = item.get('ID') 
-    
-    if item['Type'] not in ["Movies", "Anime", "Manga", "Manhwa", "Manhua"] and media_id:
+    if sheet:
         try:
-            tv_api = TV()
-            details = tv_api.details(media_id)
-            total_seasons = getattr(details, 'number_of_seasons', 1)
-            total_eps = getattr(details, 'number_of_episodes', "?")
-        except: pass
-
-    try:
-        row_data = [
-            item['Title'], item['Type'], item['Country'],
-            "Plan to Watch", item['Genres'], item['Image'], 
-            item['Overview'], item['Rating'], item['Backdrop'], 
-            1, 0, total_eps, total_seasons, media_id
-        ]
-        sheet.append_row(row_data)
-        return True
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return False
+            row_data = [
+                item['Title'], item['Type'], item['Country'],
+                "Plan to Watch", item['Genres'], item['Image'], 
+                item['Overview'], item['Rating'], item['Backdrop'], 
+                1, 0, item['Total_Eps'], item.get('Total_Seasons', '?'), item.get('ID')
+            ]
+            sheet.append_row(row_data)
+            return True
+        except: return False
+    return False
 
 def update_status_in_sheet(title, new_status, new_season, new_ep):
     sheet = get_google_sheet()
@@ -142,22 +125,14 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-# --- HELPERS: LINKS & TRAILERS ---
+# --- HELPERS ---
 def generate_provider_link(provider_name, title):
     q = urllib.parse.quote(title)
     p = provider_name.lower()
-    
     if 'netflix' in p: return f"https://www.netflix.com/search?q={q}"
-    if 'disney' in p: return f"https://www.disneyplus.com/search?q={q}"
-    if 'amazon' in p or 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
-    if 'hulu' in p: return f"https://www.hulu.com/search?q={q}"
-    if 'apple' in p: return f"https://tv.apple.com/search?term={q}"
-    if 'hbo' in p or 'max' in p: return f"https://www.max.com/search?q={q}"
+    if 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
     if 'crunchyroll' in p: return f"https://www.crunchyroll.com/search?q={q}"
-    if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
-    if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
     if 'viki' in p: return f"https://www.viki.com/search?q={q}"
-    
     return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
 
 def recover_tmdb_id(title, media_type):
@@ -211,9 +186,6 @@ def get_tmdb_trailer(tmdb_id, media_type):
             for vid in data['results']:
                 if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
-            for vid in data['results']:
-                if vid['site'] == 'YouTube':
-                    return f"https://www.youtube.com/watch?v={vid['key']}"
     except: return None
     return None
 
@@ -221,7 +193,7 @@ def get_tmdb_trailer(tmdb_id, media_type):
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # 1. TMDB (Movies, Web Series, Dramas)
+    # TMDB Search Logic
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -267,7 +239,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                 current_results.sort(key=lambda x: float(x['Rating'].split('/')[0]), reverse=True)
             results_data.extend(current_results)
 
-    # 2. ANILIST (Anime, Manga)
+    # AniList Search Logic
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
@@ -431,8 +403,7 @@ if tab == "Search & Add":
                     st.caption(f"🏷️ {item['Genres']}")
                     st.write(item['Overview'][:250] + "...")
                     if st.button(f"➕ Add Library", key=f"add_{idx}"):
-                        with st.spinner("Fetching..."):
-                            success = fetch_details_and_add(item)
+                        success = add_to_sheet(item)
                         if success: st.toast(f"✅ Saved: {item['Title']}")
                         else: st.toast("❌ Error saving.")
             st.divider()
@@ -481,20 +452,23 @@ elif tab == "My Gallery":
             if not df.empty:
                 cols_per_row = 4
                 rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
-                for row in rows:
+                for row_chunk in rows:
                     cols = st.columns(cols_per_row)
-                    for idx, (_, item) in enumerate(row.iterrows()):
-                        with cols[idx]:
+                    # Use unique DF index for key generation
+                    for col, (index, item) in zip(cols, row_chunk.iterrows()):
+                        with col:
                             img = item.get('Image', '')
                             if not img.startswith("http"): img = "https://via.placeholder.com/200x300?text=No+Image"
                             st.image(img, use_container_width=True)
                             st.markdown(f"**{item['Title']}**")
                             
+                            unique_key = f"{index}" # Use DF index for stability
+                            
                             with st.expander("⚙️ Manage"):
                                 opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
                                 curr = item.get('Status', 'Plan to Watch')
                                 if curr not in opts: curr = "Plan to Watch"
-                                new_s = st.selectbox("Status", opts, key=f"st_{idx}", index=opts.index(curr))
+                                new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
                                 
                                 if item['Type'] != "Movies":
                                     try: c_sea = int(item.get('Current_Season', 1))
@@ -502,17 +476,17 @@ elif tab == "My Gallery":
                                     try: c_ep = int(item.get('Current_Ep', 0))
                                     except: c_ep = 0
                                     col_s, col_e = st.columns(2)
-                                    with col_s: new_sea = st.number_input("S:", min_value=1, value=c_sea, key=f"s_{idx}")
-                                    with col_e: new_ep = st.number_input("E:", min_value=0, value=c_ep, key=f"e_{idx}")
+                                    with col_s: new_sea = st.number_input("S:", min_value=1, value=c_sea, key=f"s_{unique_key}")
+                                    with col_e: new_ep = st.number_input("E:", min_value=0, value=c_ep, key=f"e_{unique_key}")
                                 else: new_sea, new_ep = 1, 0
 
                                 c_sv, c_dl = st.columns(2)
                                 with c_sv: 
-                                    if st.button("Save", key=f"sv_{idx}"):
+                                    if st.button("Save", key=f"sv_{unique_key}"):
                                         update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
                                         st.rerun()
                                 with c_dl:
-                                    if st.button("Del", key=f"dl_{idx}"):
+                                    if st.button("Del", key=f"dl_{unique_key}"):
                                         delete_from_sheet(item['Title'])
                                         st.rerun()
                             
@@ -550,7 +524,7 @@ elif tab == "My Gallery":
                                     if item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
                                         st.link_button("💙 Search Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
 
-                                    if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{idx}"):
+                                    if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{unique_key}"):
                                         provs = get_streaming_info(tmdb_id, m_type, country_code)
                                         if not provs or provs == "No Info":
                                             st.warning("Not available.")
