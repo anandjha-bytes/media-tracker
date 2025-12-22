@@ -17,7 +17,6 @@ GOOGLE_SHEET_NAME = 'My Media Tracker'
 tmdb = TMDb()
 tmdb.api_key = TMDB_API_KEY
 tmdb.language = 'en'
-# We need two image sizes: one for posters (w400) and one for header backdrops (w780)
 tmdb_poster_base = "https://image.tmdb.org/t/p/w400"
 tmdb_backdrop_base = "https://image.tmdb.org/t/p/w780"
 
@@ -90,14 +89,12 @@ def process_tmdb(res, media_kind, results_list, selected_types):
     
     if detected_type not in selected_types: return
 
-    # Get Details
     poster = getattr(res, 'poster_path', None)
     backdrop = getattr(res, 'backdrop_path', None)
     
     img_url = f"{tmdb_poster_base}{poster}" if poster else ""
     backdrop_url = f"{tmdb_backdrop_base}{backdrop}" if backdrop else ""
     
-    # Rating (TMDB is out of 10)
     rating = getattr(res, 'vote_average', 0)
     overview = getattr(res, 'overview', 'No overview available.')
     
@@ -134,24 +131,26 @@ def process_anilist(res, api_type, results_list, selected_types):
     
     if detected_type not in selected_types: return
 
-    # Clean HTML tags from Anilist description
     import re
     raw_desc = res.get('description', '')
     clean_desc = re.sub('<[^<]+?>', '', raw_desc) if raw_desc else "No description."
 
-    # Rating (Anilist is out of 100, convert to 10 for consistency)
     score = res.get('averageScore')
     rating_disp = f"{score/10}/10" if score else "N/A"
+    
+    # Safe checks for images
+    img_url = res.get('coverImage', {}).get('large', '')
+    backdrop_url = res.get('bannerImage', '')
 
     results_list.append({
         "Title": res['title']['english'] if res['title']['english'] else res['title']['romaji'],
         "Type": detected_type,
         "Country": country_disp,
         "Genres": ", ".join(res['genres']),
-        "Image": res['coverImage']['large'],
+        "Image": img_url,
         "Overview": clean_desc,
         "Rating": rating_disp,
-        "Backdrop": res.get('bannerImage', '') # AniList banner
+        "Backdrop": backdrop_url
     })
 
 # --- UI START ---
@@ -200,14 +199,14 @@ if tab == "Search & Add":
                                 "Plan to Watch",
                                 item['Genres'],
                                 item['Image'],
-                                item['Overview'],   # Col G
-                                item['Rating'],     # Col H
-                                item['Backdrop']    # Col I
+                                item['Overview'],
+                                item['Rating'],
+                                item['Backdrop']
                             ])
                             st.toast(f"Saved: {item['Title']}")
             st.divider()
 
-# --- TAB 2: MY GALLERY (UPDATED WITH DETAILS) ---
+# --- TAB 2: MY GALLERY (FIXED) ---
 elif tab == "My Gallery":
     st.header("My Collection")
     
@@ -216,21 +215,18 @@ elif tab == "My Gallery":
         if data:
             df = pd.DataFrame(data)
             
-            # Filters
             with st.expander("🔎 Filter Collection"):
                 c1, c2, c3 = st.columns([2, 1, 1])
                 local_search = c1.text_input("Title Search")
                 filter_type = c2.multiselect("Type", df['Type'].unique() if 'Type' in df.columns else [])
                 filter_status = c3.multiselect("Status", df['Status'].unique() if 'Status' in df.columns else [])
             
-            # Apply Filters
             if local_search: df = df[df['Title'].astype(str).str.contains(local_search, case=False, na=False)]
             if filter_type: df = df[df['Type'].isin(filter_type)]
             if filter_status: df = df[df['Status'].isin(filter_status)]
 
             st.divider()
 
-            # RENDER GRID WITH DETAILS
             if not df.empty:
                 cols_per_row = 4
                 rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
@@ -239,31 +235,34 @@ elif tab == "My Gallery":
                     cols = st.columns(cols_per_row)
                     for idx, (_, item) in enumerate(row.iterrows()):
                         with cols[idx]:
-                            # 1. Poster Image
+                            # 1. Poster Image (With Safety Check)
                             img_url = item.get('Image')
-                            if not img_url: img_url = "https://via.placeholder.com/200x300?text=No+Image"
-                            st.image(img_url, use_container_width=True)
+                            if not isinstance(img_url, str) or not img_url.startswith("http"):
+                                img_url = "https://via.placeholder.com/200x300?text=No+Image"
                             
-                            # 2. Title & Status
+                            try:
+                                st.image(img_url, use_container_width=True)
+                            except:
+                                st.error("Image Error")
+                            
                             st.markdown(f"**{item['Title']}**")
                             
-                            # 3. "View Details" Expander (The Interactive Part)
+                            # 2. Details (With Safety Check)
                             with st.expander("🔽 View Details"):
-                                # HEADER IMAGE (Backdrop)
                                 backdrop = item.get('Backdrop')
-                                if backdrop:
-                                    st.image(backdrop, use_container_width=True)
                                 
-                                # RATING & INFO
+                                # CRITICAL FIX: Only try to show backdrop if it's a valid link
+                                if isinstance(backdrop, str) and backdrop.startswith("http"):
+                                    try:
+                                        st.image(backdrop, use_container_width=True)
+                                    except:
+                                        pass # Just ignore if it fails
+                                
                                 st.markdown(f"⭐ **Rating:** {item.get('Rating', 'N/A')}")
                                 st.markdown(f"📍 **Origin:** {item.get('Country')}")
                                 st.caption(f"🎭 {item.get('Genres')}")
-                                
-                                # OVERVIEW
                                 st.markdown("**Plot:**")
                                 st.write(item.get('Overview', 'No overview saved.'))
-                                
-                                # UPDATE STATUS (Optional Bonus)
                                 current_status = item.get('Status', 'Plan to Watch')
                                 st.markdown(f"**Status:** `{current_status}`")
 
@@ -282,13 +281,16 @@ elif tab == "Decider":
             if data:
                 choice = random.choice(data)
                 
-                # Show the full experience for the random pick too
-                if choice.get('Backdrop'):
-                    st.image(choice['Backdrop'], use_container_width=True)
+                bd = choice.get('Backdrop')
+                if isinstance(bd, str) and bd.startswith("http"):
+                    try: st.image(bd, use_container_width=True)
+                    except: pass
                 
                 c1, c2 = st.columns([1, 2])
                 with c1:
-                    if choice.get('Image'): st.image(choice['Image'])
+                    img = choice.get('Image')
+                    if isinstance(img, str) and img.startswith("http"):
+                        st.image(img)
                 with c2:
                     st.balloons()
                     st.success(f"Watch This: **{choice['Title']}**")
