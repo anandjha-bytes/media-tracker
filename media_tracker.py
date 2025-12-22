@@ -22,9 +22,10 @@ tmdb.language = 'en'
 tmdb_poster_base = "https://image.tmdb.org/t/p/w400"
 tmdb_backdrop_base = "https://image.tmdb.org/t/p/w780"
 
-# --- CACHE GENRES ---
+# --- CACHE GENRES & COUNTRIES ---
 @st.cache_data
-def get_tmdb_genres():
+def get_tmdb_config():
+    # Fetch Genres
     try:
         movie_genres = Genre().movie_list()
         tv_genres = Genre().tv_list()
@@ -33,11 +34,23 @@ def get_tmdb_genres():
         for g in movie_genres + tv_genres:
             id_to_name[g['id']] = g['name']
             name_to_id[g['name']] = g['id']
-        return id_to_name, name_to_id
     except:
-        return {}, {}
+        id_to_name, name_to_id = {}, {}
 
-tmdb_id_map, tmdb_name_map = get_tmdb_genres()
+    # Fetch Countries for Streaming Dropdown
+    try:
+        url = f"https://api.themoviedb.org/3/configuration/countries?api_key={TMDB_API_KEY}"
+        resp = requests.get(url).json()
+        # Create dictionary: {'United States': 'US', 'India': 'IN'}
+        countries = {c['english_name']: c['iso_3166_1'] for c in resp}
+        # Sort by name
+        sorted_countries = dict(sorted(countries.items()))
+    except:
+        sorted_countries = {'United States': 'US', 'India': 'IN'}
+
+    return id_to_name, name_to_id, sorted_countries
+
+tmdb_id_map, tmdb_name_map, tmdb_countries = get_tmdb_config()
 
 # --- GOOGLE SHEETS CONNECTION ---
 def get_google_sheet():
@@ -128,6 +141,24 @@ def delete_from_sheet(title):
                 st.toast(f"🗑️ Deleted: {title}")
                 time.sleep(0.5)
         except: pass
+
+# --- STREAMING PROVIDER LOGIC ---
+def get_streaming_info(tmdb_id, media_type, country_code):
+    """Fetches streaming providers for a specific TMDB ID and Country"""
+    if not tmdb_id or media_type not in ['movie', 'tv']:
+        return None
+        
+    url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/watch/providers?api_key={TMDB_API_KEY}"
+    try:
+        r = requests.get(url)
+        data = r.json()
+        
+        if 'results' in data and country_code in data['results']:
+            return data['results'][country_code]
+        else:
+            return "No Info"
+    except:
+        return None
 
 # --- SEARCH ENGINE ---
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
@@ -257,7 +288,6 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
     }
     
     query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
-    # MEDIA ARGS FIX:
     media_args = ["type: $t", "sort: $sort"]
     
     if query:
@@ -275,7 +305,6 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
         media_args.append("countryOfOrigin: $c")
         variables['c'] = country
 
-    # PAGE ARGS FIX:
     query_str = f'''
     query ({', '.join(query_args)}) {{ 
       Page(page: $p, perPage: 15) {{ 
@@ -413,16 +442,20 @@ elif tab == "My Gallery":
             df = pd.DataFrame(safe_rows, columns=HEADERS)
             
             with st.expander("Filter Collection", expanded=False):
-                f1, f2, f3, f4 = st.columns(4)
-                with f1: filter_text = st.text_input("Search Title")
-                with f2: filter_type = st.multiselect("Filter Type", df['Type'].unique() if not df.empty else [])
-                with f3: filter_genre = st.multiselect("Filter Genre", GENRES)
-                with f4: filter_status = st.multiselect("Status", ["Plan to Watch", "Watching", "Completed", "Dropped"])
+                # COUNTRY SELECTOR
+                c_sel, c_txt, c_type, c_gen = st.columns([2, 2, 2, 2])
+                with c_sel:
+                    # Default to US if not found, or India if preferred
+                    default_idx = list(tmdb_countries.keys()).index("India") if "India" in tmdb_countries else 0
+                    stream_country = st.selectbox("🌎 Select Country for Streaming", list(tmdb_countries.keys()), index=default_idx)
+                    country_code = tmdb_countries[stream_country]
+                with c_txt: filter_text = st.text_input("Search Title")
+                with c_type: filter_type = st.multiselect("Filter Type", df['Type'].unique() if not df.empty else [])
+                with c_gen: filter_genre = st.multiselect("Filter Genre", GENRES)
             
             if not df.empty:
                 if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
                 if filter_type: df = df[df['Type'].isin(filter_type)]
-                if filter_status: df = df[df['Status'].isin(filter_status)]
                 if filter_genre: mask = df['Genres'].apply(lambda x: any(g.lower() in str(x).lower() for g in filter_genre)); df = df[mask]
 
             st.divider()
@@ -479,16 +512,42 @@ elif tab == "My Gallery":
                                         delete_from_sheet(item['Title'])
                                         st.rerun()
                             
-                            with st.popover("📜 Info"):
+                            with st.popover("📜 Info & Streaming"):
                                 bd = str(item.get('Backdrop', '')).strip()
                                 if bd.startswith("http"): st.image(bd, use_container_width=True)
                                 
-                                # FIX: Use Google Search to never 404
+                                # --- READ BUTTON (Manga) ---
                                 if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
                                     search_url = f"https://www.google.com/search?q=site:comix.to+{item['Title'].replace(' ', '+')}"
                                     st.link_button("📖 Read on Comix.to", search_url)
                                 
-                                st.write(f"Rating: {item.get('Rating')}")
+                                # --- STREAMING BUTTON (Movies/TV) ---
+                                elif item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
+                                    if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{item['Title']}_{idx}"):
+                                        tmdb_id = item.get('ID')
+                                        m_type = 'movie' if item['Type'] == "Movies" else 'tv'
+                                        provs = get_streaming_info(tmdb_id, m_type, country_code)
+                                        
+                                        if not provs or provs == "No Info":
+                                            st.warning(f"Not available to stream in {stream_country}.")
+                                        else:
+                                            # Flatrate = Streaming
+                                            if 'flatrate' in provs:
+                                                st.write("🟢 **Stream:**")
+                                                for p in provs['flatrate']: st.write(f"- {p['provider_name']}")
+                                            # Rent
+                                            if 'rent' in provs:
+                                                st.write("🟡 **Rent:**")
+                                                for p in provs['rent']: st.write(f"- {p['provider_name']}")
+                                            # Buy
+                                            if 'buy' in provs:
+                                                st.write("🔵 **Buy:**")
+                                                for p in provs['buy']: st.write(f"- {p['provider_name']}")
+                                            
+                                            if 'flatrate' not in provs and 'rent' not in provs and 'buy' not in provs:
+                                                st.info("No streaming data found.")
+
+                                st.write(f"**Rating:** {item.get('Rating')}")
                                 st.write(item.get('Overview'))
             else: st.info("No matches.")
         else: st.info("Empty Library")
