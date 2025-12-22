@@ -257,9 +257,8 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
     }
     
     query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
-    
-    # FIX: 'media' does NOT accept 'page'. 'Page' accepts 'page'.
-    media_args = ["type: $t", "sort: $sort"] 
+    # MEDIA ARGS FIX:
+    media_args = ["type: $t", "sort: $sort"]
     
     if query:
         query_args.append("$s: String")
@@ -276,7 +275,7 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
         media_args.append("countryOfOrigin: $c")
         variables['c'] = country
 
-    # Construct the correct GraphQL query
+    # PAGE ARGS FIX:
     query_str = f'''
     query ({', '.join(query_args)}) {{ 
       Page(page: $p, perPage: 15) {{ 
@@ -484,9 +483,9 @@ elif tab == "My Gallery":
                                 bd = str(item.get('Backdrop', '')).strip()
                                 if bd.startswith("http"): st.image(bd, use_container_width=True)
                                 
-                                # Comix.to Button
+                                # FIX: Use Google Search to never 404
                                 if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
-                                    search_url = f"https://comix.to/search?q={item['Title'].replace(' ', '+')}"
+                                    search_url = f"https://www.google.com/search?q=site:comix.to+{item['Title'].replace(' ', '+')}"
                                     st.link_button("📖 Read on Comix.to", search_url)
                                 
                                 st.write(f"Rating: {item.get('Rating')}")
