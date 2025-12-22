@@ -85,27 +85,28 @@ def delete_from_sheet(title):
 def search_unified(query, selected_types, selected_genres, min_rating):
     results_data = []
     
-    # --- 1. TMDB (Movies / Dramas) ---
-    live_action_types = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
-    if any(t in selected_types for t in live_action_types):
+    # 1. TMDB (Movies & TV)
+    live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
+    if any(t in selected_types for t in live_action):
         
-        # PREPARE GENRES
+        # Prepare Genres
         genre_ids_str = ""
         if selected_genres:
-            ids = [str(tmdb_name_map.get(g)) for g in selected_genres if tmdb_name_map.get(g)]
+            ids = []
+            for g in selected_genres:
+                gid = tmdb_name_map.get(g)
+                if gid: ids.append(str(gid))
             genre_ids_str = ",".join(ids)
 
-        # PREPARE LANGUAGE FILTER (Crucial for Discovery)
+        # Prepare Language (For Region Specific)
         lang_filter = None
         if "K-Drama" in selected_types and len(selected_types) == 1: lang_filter = "ko"
         elif "C-Drama" in selected_types and len(selected_types) == 1: lang_filter = "zh"
         elif "Thai Drama" in selected_types and len(selected_types) == 1: lang_filter = "th"
 
-        # A. DISCOVERY MODE (No Text)
+        # A. DISCOVERY MODE
         if not query:
             discover = Discover()
-            
-            # Base Settings
             kwargs = {
                 'sort_by': 'popularity.desc',
                 'vote_average.gte': min_rating,
@@ -121,14 +122,14 @@ def search_unified(query, selected_types, selected_genres, min_rating):
                         process_tmdb(r, "Movie", results_data, selected_types, selected_genres, min_rating)
                 except: pass
             
-            # Fetch TV (Dramas)
+            # Fetch TV
             if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
                 try:
                     for r in discover.discover_tv_shows(kwargs): 
                         process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
                 except: pass
 
-        # B. SEARCH MODE (With Text)
+        # B. SEARCH MODE
         else:
             search = Search()
             if "Movies" in selected_types:
@@ -138,15 +139,14 @@ def search_unified(query, selected_types, selected_genres, min_rating):
                 for r in search.tv_shows(query): 
                     process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
 
-    # --- 2. ANILIST (Anime / Manga) ---
-    asian_comic_types = ["Anime", "Manga", "Manhwa", "Manhua"]
-    if any(t in selected_types for t in asian_comic_types):
+    # 2. ANILIST (Anime & Manga)
+    asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
+    if any(t in selected_types for t in asian_comics):
         modes = []
         if "Anime" in selected_types: modes.append("ANIME")
         if any(t in ["Manga", "Manhwa", "Manhua"] for t in selected_types): modes.append("MANGA")
         
         for m in set(modes):
-            # Pass None as query to trigger discovery mode in AniList
             q_val = query if query else None 
             for r in fetch_anilist(q_val, m, selected_genres): 
                 process_anilist(r, m, results_data, selected_types, selected_genres, min_rating)
@@ -157,7 +157,6 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
     origin = getattr(res, 'original_language', 'en')
     detected_type = "Movies" if media_kind == "Movie" else "Western Series"
     country_disp = "Western"
-    total_eps = "?"
     
     if media_kind == "TV":
         if origin == 'ko': detected_type, country_disp = "K-Drama", "South Korea"
@@ -165,22 +164,22 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
         elif origin == 'th': detected_type, country_disp = "Thai Drama", "Thailand"
         elif origin == 'ja': detected_type, country_disp = "J-Drama", "Japan"
     
-    # Filter Checks
     if detected_type not in selected_types: return
+    
     rating = getattr(res, 'vote_average', 0)
     if rating < min_rating: return
 
-    # Genre Check
     genre_ids = getattr(res, 'genre_ids', [])
     res_genres = [tmdb_id_map.get(gid, "Unknown") for gid in genre_ids]
+    
     if selected_genres:
-        res_genre_str = ", ".join(res_genres).lower()
-        if not any(sel.lower() in res_genre_str for sel in selected_genres): return
+        res_str = ", ".join(res_genres).lower()
+        if not any(s.lower() in res_str for s in selected_genres): return
 
     poster = getattr(res, 'poster_path', None)
-    backdrop = getattr(res, 'backdrop_path', None)
     img_url = f"{tmdb_poster_base}{poster}" if poster else ""
-    backdrop_url = f"{tmdb_backdrop_base}{backdrop}" if backdrop else ""
+    backdrop = getattr(res, 'backdrop_path', None)
+    bd_url = f"{tmdb_backdrop_base}{backdrop}" if backdrop else ""
     overview = getattr(res, 'overview', 'No overview.')
 
     results_list.append({
@@ -191,12 +190,11 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
         "Image": img_url,
         "Overview": overview,
         "Rating": f"{rating}/10",
-        "Backdrop": backdrop_url,
-        "Total_Eps": total_eps
+        "Backdrop": bd_url,
+        "Total_Eps": "?"
     })
 
 def fetch_anilist(query, type_, genres=None):
-    # Dynamic Query
     query_graphql = '''
     query ($s: String, $t: MediaType, $g: [String]) { 
       Page(perPage: 15) { 
@@ -220,8 +218,179 @@ def fetch_anilist(query, type_, genres=None):
     if genres: variables['g'] = genres
 
     try:
-        r = requests.post('https://graphql.anilist.co', json={'query': query_graphql, 'variables': variables})
+        r = requests.post(
+            'https://graphql.anilist.co', 
+            json={'query': query_graphql, 'variables': variables}
+        )
         return r.json()['data']['Page']['media']
-    except: return []
+    except: 
+        return []
 
-def process_anilist(res, api_type
+def process_anilist(
+    res, 
+    api_type, 
+    results_list, 
+    selected_types, 
+    selected_genres, 
+    min_rating
+):
+    origin = res['countryOfOrigin']
+    detected_type = "Anime"
+    country_disp = "Japan"
+    total = res.get('episodes') if api_type == "ANIME" else res.get('chapters')
+    if not total: total = "?"
+
+    if api_type == "MANGA":
+        if origin == 'KR': detected_type, country_disp = "Manhwa", "South Korea"
+        elif origin == 'CN': detected_type, country_disp = "Manhua", "China"
+        else: detected_type = "Manga"
+    
+    if detected_type not in selected_types: return
+
+    score = res.get('averageScore', 0)
+    rating_val = score / 10 if score else 0
+    if rating_val < min_rating: return
+
+    res_genres = res.get('genres', [])
+    if selected_genres:
+        res_str = ", ".join(res_genres).lower()
+        if not any(s.lower() in res_str for s in selected_genres): return
+
+    import re
+    raw = res.get('description', '')
+    clean = re.sub('<[^<]+?>', '', raw) if raw else "No description."
+
+    results_list.append({
+        "Title": res['title']['english'] if res['title']['english'] else res['title']['romaji'],
+        "Type": detected_type,
+        "Country": country_disp,
+        "Genres": ", ".join(res_genres),
+        "Image": res.get('coverImage', {}).get('large', ''),
+        "Overview": clean,
+        "Rating": f"{rating_val}/10",
+        "Backdrop": res.get('bannerImage', ''),
+        "Total_Eps": total
+    })
+
+# --- UI START ---
+st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
+st.title("🎬 Ultimate Media Tracker")
+
+sheet = get_google_sheet()
+if "refresh_key" not in st.session_state: st.session_state.refresh_key = 0
+
+tab = st.sidebar.radio("Menu", ["My Gallery", "Search & Add"], key="main_nav")
+GENRES = ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Mystery", "Romance", "Sci-Fi", "Sports", "Thriller", "War"]
+
+# --- SEARCH TAB ---
+if tab == "Search & Add":
+    st.subheader("Global Database Search")
+    
+    with st.expander("🔎 Filter Options", expanded=True):
+        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+        with c1: search_query = st.text_input("Title (Optional)", placeholder="Leave empty to discover...")
+        with c2: selected_types = st.multiselect("Type", ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Manga", "Manhwa", "Manhua"], default=["Movies"])
+        with c3: selected_genres = st.multiselect("Genre", GENRES)
+        with c4: min_rating = st.slider("Min Rating", 0, 10, 0)
+        
+        if st.button("🚀 Search / Discover"):
+            with st.spinner("Searching..."):
+                if not selected_types: selected_types = ["Movies"]
+                results = search_unified(search_query, selected_types, selected_genres, min_rating)
+            
+            if not results: st.warning("No results found.")
+            
+            for item in results:
+                with st.container():
+                    col_img, col_txt = st.columns([1, 6])
+                    with col_img:
+                        if item['Image']: st.image(item['Image'], use_container_width=True)
+                    with col_txt:
+                        st.subheader(item['Title'])
+                        st.caption(f"**{item['Type']}** | ⭐ {item['Rating']} | {item['Country']}")
+                        st.caption(f"🏷️ {item['Genres']}")
+                        st.write(item['Overview'][:250] + "...")
+                        if st.button(f"➕ Add", key=f"add_{item['Title']}_{item['Type']}"):
+                            if sheet:
+                                sheet.append_row([
+                                    item['Title'], item['Type'], item['Country'],
+                                    "Plan to Watch", item['Genres'], item['Image'], item['Overview'],
+                                    item['Rating'], item['Backdrop'], 0, item['Total_Eps']
+                                ])
+                                st.toast(f"✅ Saved {item['Title']}")
+                st.divider()
+
+# --- GALLERY TAB ---
+elif tab == "My Gallery":
+    st.subheader("My Library")
+    if st.button("🔄 Refresh"): st.cache_data.clear()
+    
+    if sheet:
+        data = sheet.get_all_records()
+        if data:
+            df = pd.DataFrame(data)
+            
+            with st.expander("Filter Collection", expanded=False):
+                f1, f2, f3, f4 = st.columns(4)
+                with f1: filter_text = st.text_input("Search Title")
+                with f2: filter_type = st.multiselect("Filter Type", df['Type'].unique() if 'Type' in df.columns else [])
+                with f3: filter_genre = st.multiselect("Filter Genre", GENRES)
+                with f4: filter_status = st.multiselect("Status", ["Plan to Watch", "Watching", "Completed", "Dropped"])
+            
+            if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
+            if filter_type: df = df[df['Type'].isin(filter_type)]
+            if filter_status: df = df[df['Status'].isin(filter_status)]
+            if filter_genre:
+                mask = df['Genres'].apply(lambda x: any(g.lower() in str(x).lower() for g in filter_genre))
+                df = df[mask]
+
+            st.divider()
+            
+            if not df.empty:
+                cols_per_row = 4
+                rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
+                for row in rows:
+                    cols = st.columns(cols_per_row)
+                    for idx, (_, item) in enumerate(row.iterrows()):
+                        with cols[idx]:
+                            img_url = item.get('Image', '')
+                            if not str(img_url).startswith("http"): img_url = "https://via.placeholder.com/200x300?text=No+Image"
+                            st.image(img_url, use_container_width=True)
+                            st.markdown(f"**{item['Title']}**")
+                            
+                            with st.expander("⚙️ Manage"):
+                                # Status
+                                opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
+                                curr = item.get('Status', 'Plan to Watch')
+                                if curr not in opts: curr = "Plan to Watch"
+                                new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}", index=opts.index(curr))
+                                
+                                # Ep
+                                c_ep = item.get('Current_Ep')
+                                if c_ep == '': c_ep = 0
+                                new_e = c_ep
+                                if item['Type'] != "Movies":
+                                    c1, c2, c3 = st.columns([1, 1, 1])
+                                    with c1: 
+                                        if st.button("➖", key=f"m_{item['Title']}"): new_e = int(c_ep) - 1
+                                    with c2: st.markdown(f"<center>{c_ep}</center>", unsafe_allow_html=True)
+                                    with c3: 
+                                        if st.button("➕", key=f"p_{item['Title']}"): new_e = int(c_ep) + 1
+                                
+                                c_sv, c_dl = st.columns([1, 1])
+                                with c_sv:
+                                    if st.button("💾", key=f"sv_{item['Title']}"):
+                                        update_status_in_sheet(item['Title'], new_s, new_e)
+                                        st.rerun()
+                                with c_dl:
+                                    if st.button("🗑️", key=f"dl_{item['Title']}"):
+                                        delete_from_sheet(item['Title'])
+                                        st.rerun()
+                            
+                            with st.popover("📜 Info"):
+                                if str(item.get('Backdrop')).startswith("http"):
+                                    st.image(item['Backdrop'], use_container_width=True)
+                                st.write(f"Rating: {item.get('Rating')}")
+                                st.write(item.get('Overview'))
+            else: st.info("No matches.")
+        else: st.info("Empty Library")
