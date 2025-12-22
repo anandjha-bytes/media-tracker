@@ -568,14 +568,9 @@ elif tab == "My Gallery":
                                     trailer = get_tmdb_trailer(tmdb_id, m_type)
                                     if trailer: st.video(trailer)
                                     
-                                    # 1. Cineby (Direct Search Link)
-                                    if item['Type'] in ["Movies", "Web Series"]:
-                                        cineby_url = f"https://www.cineby.gd/search/{urllib.parse.quote(item['Title'])}"
-                                        st.link_button("🎬 Watch on Cineby.gd", cineby_url)
-
-                                    # 2. KissKH (Direct Search Link)
+                                    # KissKH Smart Search (Asian Drama Only)
                                     if item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
-                                        kisskh_url = f"https://kisskh.ws/search?q={urllib.parse.quote(item['Title'])}"
+                                        kisskh_url = f"https://www.google.com/search?q=site:kisskh.ws+{item['Title'].replace(' ', '+')}"
                                         st.link_button("🎎 Watch on KissKH", kisskh_url)
                                         st.link_button("💙 Search Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
 
