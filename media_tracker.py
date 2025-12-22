@@ -7,106 +7,16 @@ import requests
 import time
 import urllib.parse
 
-# --- TRY IMPORTING SORTABLES ---
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
+st.title("🎬 Ultimate Media Tracker")
+
+# --- TRY IMPORTING SORTABLES (CRITICAL FOR DRAG & DROP) ---
 try:
     from streamlit_sortables import sort_items
     HAS_SORTABLES = True
 except ImportError:
     HAS_SORTABLES = False
-
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
-
-# ==========================================
-#        🎨 THEME & UI ENGINE
-# ==========================================
-def apply_theme():
-    with st.sidebar.expander("🎨 Appearance & Theme", expanded=True):
-        # 1. Color Theme Selection
-        theme_choice = st.selectbox(
-            "Color Theme", 
-            ["Netflix Red", "Crunchyroll Orange", "Cyberpunk Neon", "Royal Gold", "Ocean Blue", "Clean White"]
-        )
-        
-        # Theme Color Map
-        colors = {
-            "Netflix Red": "#E50914",
-            "Crunchyroll Orange": "#F47521",
-            "Cyberpunk Neon": "#00FF41",
-            "Royal Gold": "#FFD700",
-            "Ocean Blue": "#0077B6",
-            "Clean White": "#FFFFFF"
-        }
-        primary_color = colors[theme_choice]
-
-        # 2. Wallpaper Settings
-        st.write("---")
-        bg_url = st.text_input("Background Image URL (Optional)", placeholder="Paste image link here...")
-        if not bg_url:
-            # Default Cinematic Background
-            bg_url = "https://images.unsplash.com/photo-1574267432553-4b4628081c31?q=80&w=2831&auto=format&fit=crop"
-        
-        blur_amt = st.slider("Blur Amount", 0, 20, 10)
-        opacity = st.slider("Darkness Overlay", 0.0, 1.0, 0.7)
-
-    # 3. INJECT CSS
-    css = f"""
-    <style>
-    /* MAIN BACKGROUND IMAGE */
-    .stApp {{
-        background-image: url("{bg_url}");
-        background-size: cover;
-        background-position: center;
-        background-attachment: fixed;
-    }}
-    
-    /* GLASSMORPHISM OVERLAY */
-    .stApp::before {{
-        content: "";
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100vw;
-        height: 100vh;
-        background-color: rgba(0, 0, 0, {opacity});
-        backdrop-filter: blur({blur_amt}px);
-        z-index: -1;
-    }}
-
-    /* CUSTOM COLORED HEADERS */
-    h1, h2, h3, h4 {{
-        color: white !important;
-        text-shadow: 0px 0px 10px {primary_color};
-    }}
-    
-    /* BUTTON STYLING */
-    div.stButton > button {{
-        background: linear-gradient(45deg, {primary_color}, #222) !important;
-        color: white !important;
-        border: 1px solid {primary_color} !important;
-        font-weight: bold;
-        transition: all 0.3s ease;
-    }}
-    div.stButton > button:hover {{
-        transform: scale(1.05);
-        box-shadow: 0px 0px 15px {primary_color};
-    }}
-
-    /* EXPANDER & CARDS BORDERS */
-    div[data-testid="stExpander"], div[data-testid="stPopover"] {{
-        border-left: 5px solid {primary_color} !important;
-        background-color: rgba(0,0,0,0.5) !important;
-    }}
-    </style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
-
-apply_theme()
-st.title("🎬 Ultimate Media Tracker")
-
-# ==========================================
-#        ⚙️ BACKEND LOGIC STARTS
-# ==========================================
 
 # --- CONFIGURATION ---
 try:
@@ -188,6 +98,14 @@ def fetch_details_and_add(item):
     sheet = get_google_sheet()
     if not sheet: return False
     
+    # 🔒 DUPLICATE CHECK
+    try:
+        existing_titles = sheet.col_values(1) # Column A is Title
+        if item['Title'] in existing_titles:
+            st.toast(f"⚠️ '{item['Title']}' is already in your library!")
+            return False
+    except: pass
+
     total_seasons = 1
     total_eps = item['Total_Eps']
     media_id = item.get('ID') 
@@ -208,6 +126,7 @@ def fetch_details_and_add(item):
             1, 0, total_eps, total_seasons, media_id
         ]
         sheet.append_row(row_data)
+        st.toast(f"✅ Added: {item['Title']}")
         return True
     except Exception as e:
         st.error(f"Error: {e}")
@@ -329,7 +248,6 @@ def get_tmdb_trailer(tmdb_id, media_type):
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # TMDB Search
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -541,8 +459,6 @@ if tab == "Search & Add":
                     if st.button(f"➕ Add Library", key=f"add_{idx}"):
                         with st.spinner("Fetching..."):
                             success = fetch_details_and_add(item)
-                        if success: st.toast(f"✅ Saved: {item['Title']}")
-                        else: st.toast("❌ Error saving.")
             st.divider()
         if st.button("⬇️ Load More Results"):
             st.session_state.search_page += 1
@@ -580,10 +496,10 @@ elif tab == "My Gallery":
                     sorted_titles = sort_items(titles)
                     
                     if st.button("💾 Save New Order"):
-                        # Reorder DF based on new title list
                         new_df = df.set_index('Title').loc[sorted_titles].reset_index()
                         bulk_update_order(new_df)
             else:
+                st.warning("⚠️ Drag & Drop module missing. Add 'streamlit-sortables' to requirements.txt.")
                 if st.button("🔄 Refresh"): st.cache_data.clear()
 
             with st.expander("Filter Collection", expanded=False):
