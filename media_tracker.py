@@ -16,7 +16,97 @@ except ImportError:
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
+
+# ==========================================
+#        🎨 THEME & UI ENGINE
+# ==========================================
+def apply_theme():
+    with st.sidebar.expander("🎨 Appearance & Theme", expanded=True):
+        # 1. Color Theme Selection
+        theme_choice = st.selectbox(
+            "Color Theme", 
+            ["Netflix Red", "Crunchyroll Orange", "Cyberpunk Neon", "Royal Gold", "Ocean Blue", "Clean White"]
+        )
+        
+        # Theme Color Map
+        colors = {
+            "Netflix Red": "#E50914",
+            "Crunchyroll Orange": "#F47521",
+            "Cyberpunk Neon": "#00FF41",
+            "Royal Gold": "#FFD700",
+            "Ocean Blue": "#0077B6",
+            "Clean White": "#FFFFFF"
+        }
+        primary_color = colors[theme_choice]
+
+        # 2. Wallpaper Settings
+        st.write("---")
+        bg_url = st.text_input("Background Image URL (Optional)", placeholder="Paste image link here...")
+        if not bg_url:
+            # Default Cinematic Background
+            bg_url = "https://images.unsplash.com/photo-1574267432553-4b4628081c31?q=80&w=2831&auto=format&fit=crop"
+        
+        blur_amt = st.slider("Blur Amount", 0, 20, 10)
+        opacity = st.slider("Darkness Overlay", 0.0, 1.0, 0.7)
+
+    # 3. INJECT CSS
+    css = f"""
+    <style>
+    /* MAIN BACKGROUND IMAGE */
+    .stApp {{
+        background-image: url("{bg_url}");
+        background-size: cover;
+        background-position: center;
+        background-attachment: fixed;
+    }}
+    
+    /* GLASSMORPHISM OVERLAY */
+    .stApp::before {{
+        content: "";
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background-color: rgba(0, 0, 0, {opacity});
+        backdrop-filter: blur({blur_amt}px);
+        z-index: -1;
+    }}
+
+    /* CUSTOM COLORED HEADERS */
+    h1, h2, h3, h4 {{
+        color: white !important;
+        text-shadow: 0px 0px 10px {primary_color};
+    }}
+    
+    /* BUTTON STYLING */
+    div.stButton > button {{
+        background: linear-gradient(45deg, {primary_color}, #222) !important;
+        color: white !important;
+        border: 1px solid {primary_color} !important;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }}
+    div.stButton > button:hover {{
+        transform: scale(1.05);
+        box-shadow: 0px 0px 15px {primary_color};
+    }}
+
+    /* EXPANDER & CARDS BORDERS */
+    div[data-testid="stExpander"], div[data-testid="stPopover"] {{
+        border-left: 5px solid {primary_color} !important;
+        background-color: rgba(0,0,0,0.5) !important;
+    }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
+
+apply_theme()
 st.title("🎬 Ultimate Media Tracker")
+
+# ==========================================
+#        ⚙️ BACKEND LOGIC STARTS
+# ==========================================
 
 # --- CONFIGURATION ---
 try:
@@ -152,14 +242,9 @@ def bulk_update_order(new_df):
     sheet = get_google_sheet()
     if not sheet: return
     
-    # Keep header
     header = sheet.row_values(1)
-    
-    # Prepare data (convert DF back to list of lists)
-    # Ensure all columns are strings for safety
     data_to_upload = new_df.astype(str).values.tolist()
     
-    # Clear and Update
     sheet.clear()
     sheet.append_row(header)
     sheet.append_rows(data_to_upload)
@@ -174,6 +259,9 @@ def generate_provider_link(provider_name, title):
     if 'netflix' in p: return f"https://www.netflix.com/search?q={q}"
     if 'disney' in p: return f"https://www.disneyplus.com/search?q={q}"
     if 'amazon' in p or 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
+    if 'hulu' in p: return f"https://www.hulu.com/search?q={q}"
+    if 'apple' in p: return f"https://tv.apple.com/search?term={q}"
+    if 'hbo' in p or 'max' in p: return f"https://www.max.com/search?q={q}"
     if 'crunchyroll' in p: return f"https://www.crunchyroll.com/search?q={q}"
     if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
     if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
@@ -241,6 +329,7 @@ def get_tmdb_trailer(tmdb_id, media_type):
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
+    # TMDB Search
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -540,7 +629,6 @@ elif tab == "My Gallery":
                                     if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
                                         st.video(f"https://www.youtube.com/watch?v={details['trailer']['id']}")
                                     
-                                    # Anikai Button
                                     anikai_url = f"https://www.google.com/search?q=site:anikai.to+{item['Title'].replace(' ', '+')}"
                                     st.link_button("📺 Watch on Anikai.to", anikai_url)
 
