@@ -60,7 +60,7 @@ def add_to_sheet(item):
     sheet = get_google_sheet()
     if sheet:
         try:
-            # Structure: Title, Type, Country, Status, Genres, Image, Overview, Rating, Backdrop, Season, Ep, Total
+            # Columns: Title, Type, Country, Status, Genres, Image, Overview, Rating, Backdrop, Season, Ep, Total
             row_data = [
                 item['Title'], 
                 item['Type'], 
@@ -71,8 +71,8 @@ def add_to_sheet(item):
                 item['Overview'],
                 item['Rating'], 
                 item['Backdrop'], 
-                1,  # Default Current_Season = 1
-                0,  # Default Current_Ep = 0
+                1,  # Default Current_Season
+                0,  # Default Current_Ep
                 item['Total_Eps']
             ]
             sheet.append_row(row_data)
@@ -88,14 +88,11 @@ def update_status_in_sheet(title, new_status, new_season, new_ep):
         try:
             cell = sheet.find(title)
             if cell:
-                # Column 4 = Status
+                # Update Status (Col 4), Season (Col 10), Ep (Col 11)
                 sheet.update_cell(cell.row, 4, new_status)
-                # Column 10 = Current Season
                 sheet.update_cell(cell.row, 10, new_season)
-                # Column 11 = Current Episode
                 sheet.update_cell(cell.row, 11, new_ep)
-                
-                st.toast(f"✅ Updated: {title} (S{new_season}:E{new_ep})")
+                st.toast(f"✅ Updated: {title}")
                 time.sleep(0.5)
         except: pass
 
@@ -141,7 +138,6 @@ def search_unified(query, selected_types, selected_genres, min_rating):
                 try:
                     for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
                 except: pass
-
         else:
             search = Search()
             if "Movies" in selected_types:
@@ -300,7 +296,6 @@ if tab == "Search & Add":
             else: st.session_state['last_results'] = results
 
     if 'last_results' in st.session_state:
-        # Use Enumerate to prevent Duplicate Key Errors
         for idx, item in enumerate(st.session_state['last_results']):
             with st.container():
                 col_img, col_txt = st.columns([1, 6])
@@ -324,9 +319,17 @@ elif tab == "My Gallery":
     if st.button("🔄 Refresh"): st.cache_data.clear()
     
     if sheet:
-        data = sheet.get_all_records()
-        if data:
-            df = pd.DataFrame(data)
+        # --- THE FIX IS HERE: SAFER DATA LOADING ---
+        # We fetch all values as a raw list of lists to avoid GSpreadException
+        raw_data = sheet.get_all_values()
+        
+        # Check if we have data (Header row + at least 1 data row)
+        if len(raw_data) > 1:
+            headers = raw_data[0]
+            rows = raw_data[1:]
+            
+            # Create DataFrame safely
+            df = pd.DataFrame(rows, columns=headers)
             
             with st.expander("Filter Collection", expanded=False):
                 f1, f2, f3, f4 = st.columns(4)
@@ -362,40 +365,32 @@ elif tab == "My Gallery":
                                 if curr not in opts: curr = "Plan to Watch"
                                 new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}_{idx}", index=opts.index(curr))
                                 
-                                # --- SEASON & EPISODE LOGIC ---
                                 if item['Type'] != "Movies":
-                                    # Get Season
-                                    c_sea = item.get('Current_Season')
-                                    if c_sea == '' or pd.isna(c_sea): c_sea = 1
-                                    else: c_sea = int(c_sea)
+                                    # Safe Convert Season
+                                    try: c_sea = int(item.get('Current_Season', 1))
+                                    except: c_sea = 1
                                     
-                                    # Get Episode
-                                    c_ep = item.get('Current_Ep')
-                                    if c_ep == '' or pd.isna(c_ep): c_ep = 0
-                                    else: c_ep = int(c_ep)
+                                    # Safe Convert Episode
+                                    try: c_ep = int(item.get('Current_Ep', 0))
+                                    except: c_ep = 0
 
-                                    # Show Season Box (Only for TV/Anime, hide for Manga)
                                     is_manga = "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']
                                     
                                     col_sea, col_ep = st.columns(2)
-                                    
                                     with col_sea:
                                         if not is_manga:
                                             new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
                                         else:
-                                            new_sea = 1 # Manga defaults to Season 1 invisibly
-                                            
+                                            new_sea = 1
                                     with col_ep:
                                         label = "Chapter" if is_manga else "Episode"
                                         new_ep = st.number_input(f"{label}:", min_value=0, value=c_ep, step=1, key=f"ep_{item['Title']}_{idx}")
                                     
-                                    if not is_manga:
-                                        st.caption(f"S{new_sea}:E{new_ep}")
+                                    if not is_manga: st.caption(f"S{new_sea}:E{new_ep}")
                                 else:
                                     new_sea = 1
                                     new_ep = 0
 
-                                # ACTION BUTTONS
                                 c_sv, c_dl = st.columns([1, 1])
                                 with c_sv:
                                     if st.button("💾 Save", key=f"sv_{item['Title']}_{idx}"):
@@ -413,3 +408,4 @@ elif tab == "My Gallery":
                                 st.write(item.get('Overview'))
             else: st.info("No matches.")
         else: st.info("Empty Library")
+    else: st.error("Could not connect to Google Sheet.")
