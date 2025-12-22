@@ -60,6 +60,7 @@ def add_to_sheet(item):
     sheet = get_google_sheet()
     if sheet:
         try:
+            # Structure: Title, Type, Country, Status, Genres, Image, Overview, Rating, Backdrop, Season, Ep, Total
             row_data = [
                 item['Title'], 
                 item['Type'], 
@@ -70,7 +71,8 @@ def add_to_sheet(item):
                 item['Overview'],
                 item['Rating'], 
                 item['Backdrop'], 
-                0, 
+                1,  # Default Current_Season = 1
+                0,  # Default Current_Ep = 0
                 item['Total_Eps']
             ]
             sheet.append_row(row_data)
@@ -80,15 +82,20 @@ def add_to_sheet(item):
             return False
     return False
 
-def update_status_in_sheet(title, new_status, new_ep):
+def update_status_in_sheet(title, new_status, new_season, new_ep):
     sheet = get_google_sheet()
     if sheet:
         try:
             cell = sheet.find(title)
             if cell:
+                # Column 4 = Status
                 sheet.update_cell(cell.row, 4, new_status)
-                sheet.update_cell(cell.row, 10, new_ep)
-                st.toast(f"✅ Updated: {title} (Ep {new_ep})")
+                # Column 10 = Current Season
+                sheet.update_cell(cell.row, 10, new_season)
+                # Column 11 = Current Episode
+                sheet.update_cell(cell.row, 11, new_ep)
+                
+                st.toast(f"✅ Updated: {title} (S{new_season}:E{new_ep})")
                 time.sleep(0.5)
         except: pass
 
@@ -293,8 +300,7 @@ if tab == "Search & Add":
             else: st.session_state['last_results'] = results
 
     if 'last_results' in st.session_state:
-        # !!! FIX FOR DUPLICATE ELEMENT ID ERROR !!!
-        # We use enumerate(..., start=1) to create a unique ID for every button
+        # Use Enumerate to prevent Duplicate Key Errors
         for idx, item in enumerate(st.session_state['last_results']):
             with st.container():
                 col_img, col_txt = st.columns([1, 6])
@@ -306,14 +312,13 @@ if tab == "Search & Add":
                     st.caption(f"🏷️ {item['Genres']}")
                     st.write(item['Overview'][:250] + "...")
                     
-                    # We append _{idx} to the key to make it 100% unique
-                    if st.button(f"➕ Add Library", key=f"add_{item['Title']}_{item['Type']}_{idx}"):
+                    if st.button(f"➕ Add Library", key=f"add_{item['Title']}_{idx}"):
                         success = add_to_sheet(item)
                         if success: st.toast(f"✅ Saved: {item['Title']}")
                         else: st.toast("❌ Error saving.")
             st.divider()
 
-# --- GALLERY TAB (Updated with Number Input) ---
+# --- GALLERY TAB ---
 elif tab == "My Gallery":
     st.subheader("My Library")
     if st.button("🔄 Refresh"): st.cache_data.clear()
@@ -357,31 +362,44 @@ elif tab == "My Gallery":
                                 if curr not in opts: curr = "Plan to Watch"
                                 new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}_{idx}", index=opts.index(curr))
                                 
-                                # --- NEW NUMBER INPUT LOGIC ---
-                                c_ep = item.get('Current_Ep')
-                                if c_ep == '' or pd.isna(c_ep): c_ep = 0
-                                else: c_ep = int(c_ep)
-
-                                new_e = c_ep
+                                # --- SEASON & EPISODE LOGIC ---
                                 if item['Type'] != "Movies":
-                                    label_text = "Chapters" if "Manga" in item['Type'] or "Manhwa" in item['Type'] else "Episodes"
+                                    # Get Season
+                                    c_sea = item.get('Current_Season')
+                                    if c_sea == '' or pd.isna(c_sea): c_sea = 1
+                                    else: c_sea = int(c_sea)
                                     
-                                    new_e = st.number_input(
-                                        label=f"{label_text} Watched:",
-                                        min_value=0, 
-                                        value=c_ep,
-                                        step=1,
-                                        key=f"num_{item['Title']}_{idx}"
-                                    )
-                                    # Show total if available
-                                    total_eps = item.get('Total_Eps', '?')
-                                    st.caption(f"Total: {total_eps}")
+                                    # Get Episode
+                                    c_ep = item.get('Current_Ep')
+                                    if c_ep == '' or pd.isna(c_ep): c_ep = 0
+                                    else: c_ep = int(c_ep)
 
-                                # --- ACTION BUTTONS ---
+                                    # Show Season Box (Only for TV/Anime, hide for Manga)
+                                    is_manga = "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']
+                                    
+                                    col_sea, col_ep = st.columns(2)
+                                    
+                                    with col_sea:
+                                        if not is_manga:
+                                            new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
+                                        else:
+                                            new_sea = 1 # Manga defaults to Season 1 invisibly
+                                            
+                                    with col_ep:
+                                        label = "Chapter" if is_manga else "Episode"
+                                        new_ep = st.number_input(f"{label}:", min_value=0, value=c_ep, step=1, key=f"ep_{item['Title']}_{idx}")
+                                    
+                                    if not is_manga:
+                                        st.caption(f"S{new_sea}:E{new_ep}")
+                                else:
+                                    new_sea = 1
+                                    new_ep = 0
+
+                                # ACTION BUTTONS
                                 c_sv, c_dl = st.columns([1, 1])
                                 with c_sv:
                                     if st.button("💾 Save", key=f"sv_{item['Title']}_{idx}"):
-                                        update_status_in_sheet(item['Title'], new_s, new_e)
+                                        update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
                                         st.rerun()
                                 with c_dl:
                                     if st.button("🗑️ Del", key=f"dl_{item['Title']}_{idx}"):
