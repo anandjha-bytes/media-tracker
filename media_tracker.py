@@ -141,7 +141,7 @@ def delete_from_sheet(title):
 
 # --- LINK GENERATORS ---
 def generate_provider_link(provider_name, title):
-    """Generates a search link for major streaming services"""
+    """Generates a smart search link for major streaming services"""
     q = urllib.parse.quote(title)
     p = provider_name.lower()
     
@@ -158,6 +158,7 @@ def generate_provider_link(provider_name, title):
     if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
     if 'sony' in p or 'liv' in p: return f"https://www.sonyliv.com/search?q={q}"
     if 'zee5' in p: return f"https://www.zee5.com/search?q={q}"
+    if 'viki' in p or 'rakuten' in p: return f"https://www.viki.com/search?q={q}"
     
     return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
 
@@ -185,7 +186,6 @@ def get_streaming_info(tmdb_id, media_type, country_code):
     except: return None
 
 def fetch_anime_links(title):
-    """Live fetch of anime links for library items"""
     query = '''
     query ($s: String) {
         Page(perPage: 1) {
@@ -538,17 +538,20 @@ elif tab == "My Gallery":
                                 bd = str(item.get('Backdrop', '')).strip()
                                 if bd.startswith("http"): st.image(bd, use_container_width=True)
                                 
-                                # --- READ BUTTON (Manga) ---
+                                # --- MANGA / MANHWA ---
                                 if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
                                     search_url = f"https://www.google.com/search?q=site:comix.to+{item['Title'].replace(' ', '+')}"
                                     st.link_button("📖 Read on Comix.to", search_url)
                                 
-                                # --- ANIME STREAMING ---
+                                # --- ASIAN DRAMA (VIKI) ---
+                                elif item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
+                                    viki_url = f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}"
+                                    st.link_button("💙 Search on Viki", viki_url)
+
+                                # --- ANIME ---
                                 elif item['Type'] == "Anime":
                                     st.write(f"**Streaming:**")
-                                    # Fetch links freshly from AniList since we don't save them in sheet
                                     links = fetch_anime_links(item['Title'])
-                                    
                                     has_crunchyroll = False
                                     if links:
                                         for link in links:
@@ -562,13 +565,12 @@ elif tab == "My Gallery":
                                         g_search = f"https://www.google.com/search?q=watch+{item['Title'].replace(' ', '+')}+anime+online"
                                         st.link_button("🔍 Search Google (Crunchyroll Not Found)", g_search)
 
-                                # --- MOVIES/TV STREAMING ---
-                                elif item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
+                                # --- MOVIES / WESTERN / DRAMA STREAMING CHECK ---
+                                if item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
                                     if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{item['Title']}_{idx}"):
                                         tmdb_id = item.get('ID')
                                         m_type = 'movie' if item['Type'] == "Movies" else 'tv'
                                         
-                                        # Auto-Recover ID if missing
                                         if not tmdb_id or str(tmdb_id).strip() == "":
                                             tmdb_id = recover_tmdb_id(item['Title'], m_type)
                                         
@@ -579,7 +581,6 @@ elif tab == "My Gallery":
                                             g_search = f"https://www.google.com/search?q=watch+{item['Title'].replace(' ', '+')}+online"
                                             st.link_button("🔍 Search Google", g_search)
                                         else:
-                                            # Helper to render links
                                             def show_links(category_name, providers, icon):
                                                 if providers:
                                                     st.write(f"{icon} **{category_name}:**")
