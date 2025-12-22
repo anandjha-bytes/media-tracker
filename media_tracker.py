@@ -39,7 +39,7 @@ def get_tmdb_genres():
 
 tmdb_id_map, tmdb_name_map = get_tmdb_genres()
 
-# --- GOOGLE SHEETS CONNECTION (WITH SAFER REPAIR) ---
+# --- GOOGLE SHEETS CONNECTION ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = None
@@ -49,60 +49,70 @@ def get_google_sheet():
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    except Exception as e:
-        return None
+    except: return None
 
     try:
         client = gspread.authorize(creds)
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
         
-        # --- SAFER AUTO-REPAIR LOGIC ---
+        # --- AUTO-REPAIR HEADERS ---
         vals = sheet.get_all_values()
         REQUIRED_HEADERS = [
             "Title", "Type", "Country", "Status", "Genres", "Image", 
             "Overview", "Rating", "Backdrop", "Current_Season", 
-            "Current_Ep", "Total_Eps"
+            "Current_Ep", "Total_Eps", "Total_Seasons", "ID"
         ]
         
-        # Check if sheet is effectively empty or missing headers
-        is_empty = not vals
-        has_wrong_headers = False
-        
-        if not is_empty:
-            first_row = vals[0]
-            # Check if first row is empty or doesn't match
-            if not first_row or first_row != REQUIRED_HEADERS:
-                has_wrong_headers = True
-        
-        if is_empty or has_wrong_headers:
-            if is_empty:
-                sheet.append_row(REQUIRED_HEADERS)
-            else:
-                sheet.insert_row(REQUIRED_HEADERS, 1)
+        if not vals:
+            sheet.append_row(REQUIRED_HEADERS)
+        elif vals[0] != REQUIRED_HEADERS:
+            # If headers exist but mismatch (e.g. old version), update row 1
+            # Note: This might shift data if columns changed order, but usually safe for appending new cols
+            if len(vals[0]) < len(REQUIRED_HEADERS):
+                 # Add missing columns to header
+                 sheet.resize(cols=len(REQUIRED_HEADERS))
+                 for i, header in enumerate(REQUIRED_HEADERS):
+                     sheet.update_cell(1, i+1, header)
                 
         return sheet
     except Exception as e:
-        st.error(f"Google Sheet Connection Failed: {e}")
-        st.info("Make sure you shared the sheet 'My Media Tracker' with the client_email inside your secrets.")
         return None
 
 # --- DATABASE ACTIONS ---
-def add_to_sheet(item):
+def fetch_details_and_add(item):
+    """
+    Fetches exact season/episode counts before adding to sheet.
+    """
     sheet = get_google_sheet()
-    if sheet:
+    if not sheet: return False
+    
+    # 1. DEEP FETCH FOR DETAILS
+    total_seasons = 1
+    total_eps = item['Total_Eps']
+    media_id = item.get('ID') # We need to store ID during search to do this
+    
+    # Only fetch if it's a TV show/Drama and we have an ID
+    if item['Type'] not in ["Movies", "Anime", "Manga", "Manhwa", "Manhua"] and media_id:
         try:
-            row_data = [
-                item['Title'], item['Type'], item['Country'],
-                "Plan to Watch", item['Genres'], item['Image'], 
-                item['Overview'], item['Rating'], item['Backdrop'], 
-                1, 0, item['Total_Eps']
-            ]
-            sheet.append_row(row_data)
-            return True
-        except Exception as e:
-            st.error(f"Error saving: {e}")
-            return False
-    return False
+            tv_api = TV()
+            details = tv_api.details(media_id)
+            total_seasons = getattr(details, 'number_of_seasons', 1)
+            total_eps = getattr(details, 'number_of_episodes', "?")
+        except:
+            pass # Keep defaults if fetch fails
+
+    try:
+        row_data = [
+            item['Title'], item['Type'], item['Country'],
+            "Plan to Watch", item['Genres'], item['Image'], 
+            item['Overview'], item['Rating'], item['Backdrop'], 
+            1, 0, total_eps, total_seasons, media_id
+        ]
+        sheet.append_row(row_data)
+        return True
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return False
 
 def update_status_in_sheet(title, new_status, new_season, new_ep):
     sheet = get_google_sheet()
@@ -183,7 +193,6 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
     origin = getattr(res, 'original_language', 'en')
     detected_type = "Movies" if media_kind == "Movie" else "Western Series"
     country_disp = "Western"
-    total_eps = "?"
     
     if media_kind == "TV":
         if origin == 'ko': detected_type, country_disp = "K-Drama", "South Korea"
@@ -214,7 +223,8 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
         "Overview": getattr(res, 'overview', 'No overview.'),
         "Rating": f"{rating}/10",
         "Backdrop": f"{tmdb_backdrop_base}{getattr(res, 'backdrop_path', '')}",
-        "Total_Eps": total_eps
+        "Total_Eps": "?", 
+        "ID": getattr(res, 'id', None)
     })
 
 def fetch_anilist(query, type_, genres=None):
@@ -283,7 +293,8 @@ def process_anilist(res, api_type, results_list, selected_types, selected_genres
         "Overview": clean,
         "Rating": f"{rating_val}/10",
         "Backdrop": res.get('bannerImage', ''),
-        "Total_Eps": total
+        "Total_Eps": total,
+        "ID": None # Not needed for AniList deep fetch as we already have total
     })
 
 # --- UI START ---
@@ -328,7 +339,8 @@ if tab == "Search & Add":
                     st.write(item['Overview'][:250] + "...")
                     
                     if st.button(f"➕ Add Library", key=f"add_{item['Title']}_{idx}"):
-                        success = add_to_sheet(item)
+                        with st.spinner("Fetching details..."):
+                            success = fetch_details_and_add(item)
                         if success: st.toast(f"✅ Saved: {item['Title']}")
                         else: st.toast("❌ Error saving.")
             st.divider()
@@ -339,16 +351,14 @@ elif tab == "My Gallery":
     if st.button("🔄 Refresh"): st.cache_data.clear()
     
     if sheet:
-        # --- SAFE LOAD ---
         raw_data = sheet.get_all_values()
-        HEADERS = ["Title", "Type", "Country", "Status", "Genres", "Image", "Overview", "Rating", "Backdrop", "Current_Season", "Current_Ep", "Total_Eps"]
+        HEADERS = ["Title", "Type", "Country", "Status", "Genres", "Image", "Overview", "Rating", "Backdrop", "Current_Season", "Current_Ep", "Total_Eps", "Total_Seasons", "ID"]
         
         if len(raw_data) > 1:
             safe_rows = []
             for row in raw_data[1:]:
-                # SKIP EMPTY ROWS
                 if not row or not row[0].strip(): continue
-                # PAD ROWS
+                # Pad rows to match new header length
                 if len(row) < len(HEADERS): row += [""] * (len(HEADERS) - len(row))
                 safe_rows.append(row[:len(HEADERS)])
             
@@ -393,17 +403,22 @@ elif tab == "My Gallery":
                                     try: c_ep = int(item.get('Current_Ep', 0))
                                     except: c_ep = 0
 
+                                    # Get Totals
+                                    tot_eps = item.get('Total_Eps', '?')
+                                    tot_sea = item.get('Total_Seasons', '?')
+
                                     is_manga = "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']
                                     
                                     col_sea, col_ep = st.columns(2)
                                     with col_sea:
-                                        if not is_manga: new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
+                                        if not is_manga:
+                                            new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
+                                            st.caption(f"Total: {tot_sea}")
                                         else: new_sea = 1
                                     with col_ep:
                                         label = "Chapter" if is_manga else "Episode"
                                         new_ep = st.number_input(f"{label}:", min_value=0, value=c_ep, step=1, key=f"ep_{item['Title']}_{idx}")
-                                    
-                                    if not is_manga: st.caption(f"S{new_sea}:E{new_ep}")
+                                        st.caption(f"Total: {tot_eps}")
                                 else:
                                     new_sea = 1; new_ep = 0
 
