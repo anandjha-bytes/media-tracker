@@ -11,7 +11,7 @@ import urllib.parse
 st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
 st.title("🎬 Ultimate Media Tracker")
 
-# --- TRY IMPORTING SORTABLES (CRITICAL FOR DRAG & DROP) ---
+# --- TRY IMPORTING SORTABLES ---
 try:
     from streamlit_sortables import sort_items
     HAS_SORTABLES = True
@@ -100,7 +100,7 @@ def fetch_details_and_add(item):
     
     # 🔒 DUPLICATE CHECK
     try:
-        existing_titles = sheet.col_values(1) # Column A is Title
+        existing_titles = sheet.col_values(1)
         if item['Title'] in existing_titles:
             st.toast(f"⚠️ '{item['Title']}' is already in your library!")
             return False
@@ -568,14 +568,14 @@ elif tab == "My Gallery":
                                     trailer = get_tmdb_trailer(tmdb_id, m_type)
                                     if trailer: st.video(trailer)
                                     
-                                    # 1. Cineby (Movies/Web)
+                                    # 1. Cineby (Direct Search Link)
                                     if item['Type'] in ["Movies", "Web Series"]:
-                                        cineby_url = f"https://www.google.com/search?q=site:cineby.gd+{item['Title'].replace(' ', '+')}"
+                                        cineby_url = f"https://www.cineby.gd/search/{urllib.parse.quote(item['Title'])}"
                                         st.link_button("🎬 Watch on Cineby.gd", cineby_url)
 
-                                    # 2. KissKH (Asian Dramas)
+                                    # 2. KissKH (Direct Search Link)
                                     if item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
-                                        kisskh_url = f"https://www.google.com/search?q=site:kisskh.ws+{item['Title'].replace(' ', '+')}"
+                                        kisskh_url = f"https://kisskh.ws/search?q={urllib.parse.quote(item['Title'])}"
                                         st.link_button("🎎 Watch on KissKH", kisskh_url)
                                         st.link_button("💙 Search Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
 
