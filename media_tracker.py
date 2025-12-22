@@ -9,7 +9,6 @@ import requests
 try:
     TMDB_API_KEY = st.secrets["tmdb_api_key"]
 except:
-    # REPLACE THIS WITH YOUR KEY IF RUNNING LOCALLY WITHOUT SECRETS FILE
     TMDB_API_KEY = "YOUR_TMDB_API_KEY_HERE"
 
 GOOGLE_SHEET_NAME = 'My Media Tracker'
@@ -18,7 +17,9 @@ GOOGLE_SHEET_NAME = 'My Media Tracker'
 tmdb = TMDb()
 tmdb.api_key = TMDB_API_KEY
 tmdb.language = 'en'
-tmdb_img_base = "https://image.tmdb.org/t/p/w400"
+# We need two image sizes: one for posters (w400) and one for header backdrops (w780)
+tmdb_poster_base = "https://image.tmdb.org/t/p/w400"
+tmdb_backdrop_base = "https://image.tmdb.org/t/p/w780"
 
 # --- CACHE GENRES ---
 @st.cache_data
@@ -39,48 +40,44 @@ tmdb_genres_map = get_tmdb_genres()
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # Try Cloud Secrets first
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     except:
-        # Fallback to local file
         try:
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         except:
-            st.error("⚠️ Authentication Error: credentials.json not found.")
             return None
     client = gspread.authorize(creds)
     try:
         return client.open(GOOGLE_SHEET_NAME).sheet1
     except:
-        st.error(f"⚠️ Could not open Sheet '{GOOGLE_SHEET_NAME}'. Did you share it with the client_email?")
         return None
 
-# --- SEARCH ENGINES ---
-def search_unified(query, selected_types, selected_genres):
+# --- SEARCH LOGIC ---
+def search_unified(query, selected_types):
     results_data = []
     
-    # TMDB Search
+    # 1. TMDB SEARCH
     live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         search = Search()
         if "Movies" in selected_types:
-            for r in search.movies(query): process_tmdb(r, "Movie", results_data, selected_types, selected_genres)
+            for r in search.movies(query): process_tmdb(r, "Movie", results_data, selected_types)
         if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
-            for r in search.tv_shows(query): process_tmdb(r, "TV", results_data, selected_types, selected_genres)
+            for r in search.tv_shows(query): process_tmdb(r, "TV", results_data, selected_types)
 
-    # AniList Search
+    # 2. ANILIST SEARCH
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
         if "Anime" in selected_types: modes.append("ANIME")
         if any(t in ["Manga", "Manhwa", "Manhua"] for t in selected_types): modes.append("MANGA")
         for m in set(modes):
-            for r in fetch_anilist(query, m): process_anilist(r, m, results_data, selected_types, selected_genres)
+            for r in fetch_anilist(query, m): process_anilist(r, m, results_data, selected_types)
 
     return results_data
 
-def process_tmdb(res, media_kind, results_list, selected_types, selected_genres):
+def process_tmdb(res, media_kind, results_list, selected_types):
     origin = getattr(res, 'original_language', 'en')
     detected_type = "Movies" if media_kind == "Movie" else "Western Series"
     country_disp = "Western"
@@ -93,29 +90,39 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres)
     
     if detected_type not in selected_types: return
 
+    # Get Details
+    poster = getattr(res, 'poster_path', None)
+    backdrop = getattr(res, 'backdrop_path', None)
+    
+    img_url = f"{tmdb_poster_base}{poster}" if poster else ""
+    backdrop_url = f"{tmdb_backdrop_base}{backdrop}" if backdrop else ""
+    
+    # Rating (TMDB is out of 10)
+    rating = getattr(res, 'vote_average', 0)
+    overview = getattr(res, 'overview', 'No overview available.')
+    
     genre_ids = getattr(res, 'genre_ids', [])
     res_genres = [tmdb_genres_map.get(gid, "Unknown") for gid in genre_ids]
-    if selected_genres and not any(g in selected_genres for g in res_genres): return
 
-    poster = getattr(res, 'poster_path', None)
-    img = f"{tmdb_img_base}{poster}" if poster else ""
-    
     results_list.append({
         "Title": getattr(res, 'title', getattr(res, 'name', 'Unknown')),
         "Type": detected_type,
         "Country": country_disp,
         "Genres": ", ".join(res_genres),
-        "Image": img
+        "Image": img_url,
+        "Overview": overview,
+        "Rating": f"{rating}/10",
+        "Backdrop": backdrop_url
     })
 
 def fetch_anilist(query, type_):
-    q = '''query ($s: String, $t: MediaType) { Page(perPage: 10) { media(search: $s, type: $t) { title { romaji english } coverImage { large } genres countryOfOrigin type } } }'''
+    q = '''query ($s: String, $t: MediaType) { Page(perPage: 10) { media(search: $s, type: $t) { title { romaji english } coverImage { large } bannerImage genres countryOfOrigin type description averageScore } } }'''
     try:
         r = requests.post('https://graphql.anilist.co', json={'query': q, 'variables': {'s': query, 't': type_}})
         return r.json()['data']['Page']['media']
     except: return []
 
-def process_anilist(res, api_type, results_list, selected_types, selected_genres):
+def process_anilist(res, api_type, results_list, selected_types):
     origin = res['countryOfOrigin']
     detected_type = "Anime"
     country_disp = "Japan"
@@ -126,15 +133,25 @@ def process_anilist(res, api_type, results_list, selected_types, selected_genres
         else: detected_type = "Manga"
     
     if detected_type not in selected_types: return
-    if selected_genres and not any(g in selected_genres for g in res['genres']): return
 
-    title = res['title']['english'] if res['title']['english'] else res['title']['romaji']
+    # Clean HTML tags from Anilist description
+    import re
+    raw_desc = res.get('description', '')
+    clean_desc = re.sub('<[^<]+?>', '', raw_desc) if raw_desc else "No description."
+
+    # Rating (Anilist is out of 100, convert to 10 for consistency)
+    score = res.get('averageScore')
+    rating_disp = f"{score/10}/10" if score else "N/A"
+
     results_list.append({
-        "Title": title,
+        "Title": res['title']['english'] if res['title']['english'] else res['title']['romaji'],
         "Type": detected_type,
         "Country": country_disp,
         "Genres": ", ".join(res['genres']),
-        "Image": res['coverImage']['large']
+        "Image": res['coverImage']['large'],
+        "Overview": clean_desc,
+        "Rating": rating_disp,
+        "Backdrop": res.get('bannerImage', '') # AniList banner
     })
 
 # --- UI START ---
@@ -158,11 +175,10 @@ if tab == "Search & Add":
 
     if search_query:
         if not selected_types: selected_types = all_types
-        with st.spinner("Searching Databases..."):
-            results = search_unified(search_query, selected_types, [])
+        with st.spinner("Searching..."):
+            results = search_unified(search_query, selected_types)
         
-        if not results:
-            st.warning("No results found.")
+        if not results: st.warning("No results found.")
         
         for item in results:
             with st.container():
@@ -171,7 +187,9 @@ if tab == "Search & Add":
                     if item['Image']: st.image(item['Image'], use_container_width=True)
                 with col_txt:
                     st.subheader(item['Title'])
-                    st.markdown(f"**{item['Type']}** | {item['Country']} | {item['Genres']}")
+                    st.markdown(f"**{item['Type']}** | ⭐ {item['Rating']}")
+                    st.caption(f"{item['Country']} • {item['Genres']}")
+                    st.write(item['Overview'][:200] + "..." if len(item['Overview']) > 200 else item['Overview'])
                     
                     if st.button(f"➕ Add to Library", key=f"add_{item['Title']}_{item['Type']}"):
                         if sheet:
@@ -181,12 +199,15 @@ if tab == "Search & Add":
                                 item['Country'],
                                 "Plan to Watch",
                                 item['Genres'],
-                                item['Image']
+                                item['Image'],
+                                item['Overview'],   # Col G
+                                item['Rating'],     # Col H
+                                item['Backdrop']    # Col I
                             ])
                             st.toast(f"Saved: {item['Title']}")
             st.divider()
 
-# --- TAB 2: MY GALLERY (UPDATED) ---
+# --- TAB 2: MY GALLERY (UPDATED WITH DETAILS) ---
 elif tab == "My Gallery":
     st.header("My Collection")
     
@@ -195,63 +216,81 @@ elif tab == "My Gallery":
         if data:
             df = pd.DataFrame(data)
             
-            # --- GALLERY SEARCH BAR ---
-            with st.container():
-                col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
-                with col_s1:
-                    local_search = st.text_input("🔍 Search within library", placeholder="Find a saved title...")
-                with col_s2:
-                    unique_types = list(df['Type'].unique()) if 'Type' in df.columns else []
-                    filter_type = st.multiselect("Type", unique_types)
-                with col_s3:
-                    unique_countries = list(df['Country'].unique()) if 'Country' in df.columns else []
-                    filter_country = st.multiselect("Country", unique_countries)
+            # Filters
+            with st.expander("🔎 Filter Collection"):
+                c1, c2, c3 = st.columns([2, 1, 1])
+                local_search = c1.text_input("Title Search")
+                filter_type = c2.multiselect("Type", df['Type'].unique() if 'Type' in df.columns else [])
+                filter_status = c3.multiselect("Status", df['Status'].unique() if 'Status' in df.columns else [])
             
+            # Apply Filters
+            if local_search: df = df[df['Title'].astype(str).str.contains(local_search, case=False, na=False)]
+            if filter_type: df = df[df['Type'].isin(filter_type)]
+            if filter_status: df = df[df['Status'].isin(filter_status)]
+
             st.divider()
 
-            # --- APPLY FILTERS ---
-            if local_search:
-                df = df[df['Title'].astype(str).str.contains(local_search, case=False, na=False)]
-            if filter_type:
-                df = df[df['Type'].isin(filter_type)]
-            if filter_country:
-                df = df[df['Country'].isin(filter_country)]
-
-            # --- RENDER GRID ---
+            # RENDER GRID WITH DETAILS
             if not df.empty:
-                cols_per_row = 5
+                cols_per_row = 4
                 rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
                 
                 for row in rows:
                     cols = st.columns(cols_per_row)
                     for idx, (_, item) in enumerate(row.iterrows()):
                         with cols[idx]:
+                            # 1. Poster Image
                             img_url = item.get('Image')
                             if not img_url: img_url = "https://via.placeholder.com/200x300?text=No+Image"
                             st.image(img_url, use_container_width=True)
+                            
+                            # 2. Title & Status
                             st.markdown(f"**{item['Title']}**")
-                            st.caption(f"{item['Type']} • {item['Country']}")
-                            status = item.get('Status', 'Plan to Watch')
-                            st.markdown(f"Status: **{status}**")
+                            
+                            # 3. "View Details" Expander (The Interactive Part)
+                            with st.expander("🔽 View Details"):
+                                # HEADER IMAGE (Backdrop)
+                                backdrop = item.get('Backdrop')
+                                if backdrop:
+                                    st.image(backdrop, use_container_width=True)
+                                
+                                # RATING & INFO
+                                st.markdown(f"⭐ **Rating:** {item.get('Rating', 'N/A')}")
+                                st.markdown(f"📍 **Origin:** {item.get('Country')}")
+                                st.caption(f"🎭 {item.get('Genres')}")
+                                
+                                # OVERVIEW
+                                st.markdown("**Plot:**")
+                                st.write(item.get('Overview', 'No overview saved.'))
+                                
+                                # UPDATE STATUS (Optional Bonus)
+                                current_status = item.get('Status', 'Plan to Watch')
+                                st.markdown(f"**Status:** `{current_status}`")
+
             else:
-                st.info("No matches found in your library.")
+                st.info("No matches found.")
         else:
-            st.info("Your library is empty. Go add some movies!")
+            st.info("Library empty.")
 
 # --- TAB 3: DECIDER ---
 elif tab == "Decider":
     st.header("🎲 Random Picker")
-    if st.button("Pick Something for Me"):
+    if st.button("Pick Something!"):
         if sheet:
             import random
             data = sheet.get_all_records()
             if data:
                 choice = random.choice(data)
+                
+                # Show the full experience for the random pick too
+                if choice.get('Backdrop'):
+                    st.image(choice['Backdrop'], use_container_width=True)
+                
                 c1, c2 = st.columns([1, 2])
                 with c1:
                     if choice.get('Image'): st.image(choice['Image'])
                 with c2:
                     st.balloons()
                     st.success(f"Watch This: **{choice['Title']}**")
-                    st.write(f"Type: {choice['Type']}")
-                    st.write(f"Country: {choice['Country']}")
+                    st.markdown(f"⭐ **{choice.get('Rating', 'N/A')}**")
+                    st.write(choice.get('Overview', ''))
