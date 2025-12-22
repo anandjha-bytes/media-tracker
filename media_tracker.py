@@ -15,7 +15,6 @@ st.title("🎬 Ultimate Media Tracker")
 try:
     TMDB_API_KEY = st.secrets["tmdb_api_key"]
 except:
-    # Use fallback or raise error if crucial
     st.error("Secrets not found. Please set up .streamlit/secrets.toml")
     st.stop()
 
@@ -68,7 +67,6 @@ def get_google_sheet():
         client = gspread.authorize(creds)
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
         
-        # Auto-repair headers
         vals = sheet.get_all_values()
         REQUIRED_HEADERS = [
             "Title", "Type", "Country", "Status", "Genres", "Image", 
@@ -143,30 +141,48 @@ def delete_from_sheet(title):
         except: pass
 
 def reorder_sheet(title, direction):
+    """Moves a row up or down by swapping content"""
     sheet = get_google_sheet()
-    if sheet:
-        try:
-            cell = sheet.find(title)
-            if cell:
-                row_idx = cell.row
-                if direction == 'up' and row_idx > 2:
-                    swap_idx = row_idx - 1
-                elif direction == 'down' and row_idx < sheet.row_count:
-                    swap_idx = row_idx + 1
-                else:
-                    return # Cannot move
-                
-                # Get values
-                row_vals = sheet.row_values(row_idx)
-                swap_vals = sheet.row_values(swap_idx)
-                
-                # Swap
-                sheet.update_row(row_idx, swap_vals)
-                sheet.update_row(swap_idx, row_vals)
-                st.rerun()
-        except: pass
+    if not sheet: return
 
-# --- HELPERS: LINKS & TRAILERS ---
+    try:
+        cell = sheet.find(title)
+        if not cell: return
+
+        curr_row = cell.row
+        
+        # Calculate target row (1-based index)
+        if direction == 'up':
+            target_row = curr_row - 1
+        else:
+            target_row = curr_row + 1
+
+        # Bounds Check (Row 1 is Header)
+        if target_row < 2 or target_row > len(sheet.get_all_values()):
+            st.toast("⚠️ Cannot move further.")
+            return
+
+        # Fetch Data
+        curr_vals = sheet.row_values(curr_row)
+        target_vals = sheet.row_values(target_row)
+        
+        # Ensure we don't lose columns if one row is shorter
+        def pad_row(r): return r + [""] * (14 - len(r))
+        curr_vals = pad_row(curr_vals)
+        target_vals = pad_row(target_vals)
+
+        # Swap using update (Standard Gspread)
+        # Note: Range is A to N (14 columns)
+        sheet.update(range_name=f"A{curr_row}:N{curr_row}", values=[target_vals])
+        sheet.update(range_name=f"A{target_row}:N{target_row}", values=[curr_vals])
+        
+        st.toast(f"Moved {direction}: {title}")
+        time.sleep(1) # Wait for API
+        st.rerun()
+    except Exception as e:
+        st.error(f"Move Error: {e}")
+
+# --- HELPERS ---
 def generate_provider_link(provider_name, title):
     q = urllib.parse.quote(title)
     p = provider_name.lower()
@@ -245,7 +261,7 @@ def get_tmdb_trailer(tmdb_id, media_type):
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # 1. TMDB (Movies, Web Series, Dramas)
+    # TMDB Search Logic
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -291,7 +307,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                 current_results.sort(key=lambda x: float(x['Rating'].split('/')[0]), reverse=True)
             results_data.extend(current_results)
 
-    # 2. ANILIST (Anime, Manga)
+    # AniList Search Logic
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
@@ -517,10 +533,10 @@ elif tab == "My Gallery":
                             c_title, c_up, c_down = st.columns([4, 1, 1])
                             with c_title: st.markdown(f"**{item['Title']}**")
                             with c_up:
-                                if st.button("⬆️", key=f"up_{index}"):
+                                if st.button("↑", key=f"up_{index}"):
                                     reorder_sheet(item['Title'], 'up')
                             with c_down:
-                                if st.button("⬇️", key=f"down_{index}"):
+                                if st.button("↓", key=f"down_{index}"):
                                     reorder_sheet(item['Title'], 'down')
                             
                             unique_key = f"{index}"
