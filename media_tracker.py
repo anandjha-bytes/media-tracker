@@ -66,10 +66,7 @@ def get_google_sheet():
         if not vals:
             sheet.append_row(REQUIRED_HEADERS)
         elif vals[0] != REQUIRED_HEADERS:
-            # If headers exist but mismatch (e.g. old version), update row 1
-            # Note: This might shift data if columns changed order, but usually safe for appending new cols
             if len(vals[0]) < len(REQUIRED_HEADERS):
-                 # Add missing columns to header
                  sheet.resize(cols=len(REQUIRED_HEADERS))
                  for i, header in enumerate(REQUIRED_HEADERS):
                      sheet.update_cell(1, i+1, header)
@@ -80,26 +77,20 @@ def get_google_sheet():
 
 # --- DATABASE ACTIONS ---
 def fetch_details_and_add(item):
-    """
-    Fetches exact season/episode counts before adding to sheet.
-    """
     sheet = get_google_sheet()
     if not sheet: return False
     
-    # 1. DEEP FETCH FOR DETAILS
     total_seasons = 1
     total_eps = item['Total_Eps']
-    media_id = item.get('ID') # We need to store ID during search to do this
+    media_id = item.get('ID') 
     
-    # Only fetch if it's a TV show/Drama and we have an ID
     if item['Type'] not in ["Movies", "Anime", "Manga", "Manhwa", "Manhua"] and media_id:
         try:
             tv_api = TV()
             details = tv_api.details(media_id)
             total_seasons = getattr(details, 'number_of_seasons', 1)
             total_eps = getattr(details, 'number_of_episodes', "?")
-        except:
-            pass # Keep defaults if fetch fails
+        except: pass
 
     try:
         row_data = [
@@ -139,10 +130,10 @@ def delete_from_sheet(title):
         except: pass
 
 # --- SEARCH ENGINE ---
-def search_unified(query, selected_types, selected_genres, min_rating):
+def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # TMDB
+    # 1. TMDB LOGIC
     live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -155,27 +146,53 @@ def search_unified(query, selected_types, selected_genres, min_rating):
             ids = [str(tmdb_name_map.get(g)) for g in selected_genres if tmdb_name_map.get(g)]
             g_ids = ",".join(ids)
 
+        # Map Sort Option to TMDB Syntax
+        tmdb_sort = 'popularity.desc'
+        if sort_option == 'Top Rated': tmdb_sort = 'vote_average.desc'
+        # Relevance is default for text search, or popularity for discovery
+
         if not query:
+            # DISCOVERY MODE
             discover = Discover()
-            kwargs = {'sort_by': 'popularity.desc', 'vote_average.gte': min_rating, 'with_genres': g_ids, 'page': 1}
+            kwargs = {
+                'sort_by': tmdb_sort, 
+                'with_genres': g_ids, 
+                'page': page,
+                'vote_count.gte': 50 # Ignore items with 0 votes to avoid trash
+            }
             if lang: kwargs['with_original_language'] = lang
 
             if "Movies" in selected_types:
                 try: 
-                    for r in discover.discover_movies(kwargs): process_tmdb(r, "Movie", results_data, selected_types, selected_genres, min_rating)
+                    for r in discover.discover_movies(kwargs): process_tmdb(r, "Movie", results_data, selected_types, selected_genres)
                 except: pass
             if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
                 try:
-                    for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
+                    for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres)
                 except: pass
         else:
+            # SEARCH MODE
             search = Search()
+            current_results = []
             if "Movies" in selected_types:
-                for r in search.movies(query): process_tmdb(r, "Movie", results_data, selected_types, selected_genres, min_rating)
+                try:
+                    for r in search.movies(query, page=page): process_tmdb(r, "Movie", current_results, selected_types, selected_genres)
+                except: pass
             if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
-                for r in search.tv_shows(query): process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
+                try:
+                    for r in search.tv_shows(query, page=page): process_tmdb(r, "TV", current_results, selected_types, selected_genres)
+                except: pass
+            
+            # Manual Sort for Search Results (since API searches by relevance)
+            if sort_option == "Top Rated":
+                current_results.sort(key=lambda x: float(x['Rating'].split('/')[0]), reverse=True)
+            elif sort_option == "Popularity":
+                # API usually returns popularity, but we can't strictly enforce generic popularity sort easily on text search mixed results
+                pass 
+            
+            results_data.extend(current_results)
 
-    # ANILIST
+    # 2. ANILIST LOGIC
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
@@ -184,12 +201,12 @@ def search_unified(query, selected_types, selected_genres, min_rating):
         
         for m in set(modes):
             q_val = query if query else None 
-            for r in fetch_anilist(q_val, m, selected_genres): 
-                process_anilist(r, m, results_data, selected_types, selected_genres, min_rating)
+            for r in fetch_anilist(q_val, m, selected_genres, sort_option, page): 
+                process_anilist(r, m, results_data, selected_types, selected_genres)
 
     return results_data
 
-def process_tmdb(res, media_kind, results_list, selected_types, selected_genres, min_rating):
+def process_tmdb(res, media_kind, results_list, selected_types, selected_genres):
     origin = getattr(res, 'original_language', 'en')
     detected_type = "Movies" if media_kind == "Movie" else "Western Series"
     country_disp = "Western"
@@ -201,9 +218,8 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
         elif origin == 'ja': detected_type, country_disp = "J-Drama", "Japan"
     
     if detected_type not in selected_types: return
+    
     rating = getattr(res, 'vote_average', 0)
-    if rating < min_rating: return
-
     genre_ids = getattr(res, 'genre_ids', [])
     res_genres = [tmdb_id_map.get(gid, "Unknown") for gid in genre_ids]
     
@@ -227,29 +243,27 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
         "ID": getattr(res, 'id', None)
     })
 
-def fetch_anilist(query, type_, genres=None):
-    if query:
-        query_graphql = '''
-        query ($s: String, $t: MediaType, $g: [String]) { 
-          Page(perPage: 15) { 
-            media(search: $s, type: $t, genre_in: $g, sort: POPULARITY_DESC) { 
-              title { romaji english } coverImage { large } bannerImage genres countryOfOrigin type description averageScore episodes chapters 
-            } 
-          } 
-        }
-        '''
-        variables = {'s': query, 't': type_}
+def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1):
+    # Sort Mapping
+    anilist_sort = "POPULARITY_DESC"
+    if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
+    elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
+    
+    query_graphql = '''
+    query ($s: String, $t: MediaType, $g: [String], $p: Int, $sort: [MediaSort]) { 
+      Page(perPage: 15, page: $p) { 
+        media(search: $s, type: $t, genre_in: $g, sort: $sort) { 
+          title { romaji english } coverImage { large } bannerImage genres countryOfOrigin type description averageScore episodes chapters 
+        } 
+      } 
+    }
+    '''
+    # Remove search param if query is empty (Discover mode)
+    if not query:
+        query_graphql = query_graphql.replace("search: $s,", "")
+        variables = {'t': type_, 'p': page, 'sort': [anilist_sort]}
     else:
-        query_graphql = '''
-        query ($t: MediaType, $g: [String]) { 
-          Page(perPage: 15) { 
-            media(type: $t, genre_in: $g, sort: POPULARITY_DESC) { 
-              title { romaji english } coverImage { large } bannerImage genres countryOfOrigin type description averageScore episodes chapters 
-            } 
-          } 
-        }
-        '''
-        variables = {'t': type_}
+        variables = {'s': query, 't': type_, 'p': page, 'sort': [anilist_sort]}
 
     if genres: variables['g'] = genres
 
@@ -258,7 +272,7 @@ def fetch_anilist(query, type_, genres=None):
         return r.json()['data']['Page']['media']
     except: return []
 
-def process_anilist(res, api_type, results_list, selected_types, selected_genres, min_rating):
+def process_anilist(res, api_type, results_list, selected_types, selected_genres):
     origin = res.get('countryOfOrigin', 'JP')
     detected_type = "Anime"
     country_disp = "Japan"
@@ -271,9 +285,9 @@ def process_anilist(res, api_type, results_list, selected_types, selected_genres
         else: detected_type = "Manga"
     
     if detected_type not in selected_types: return
+    
     score = res.get('averageScore', 0)
     rating_val = score / 10 if score else 0
-    if rating_val < min_rating: return
 
     res_genres = res.get('genres', [])
     if selected_genres:
@@ -294,7 +308,7 @@ def process_anilist(res, api_type, results_list, selected_types, selected_genres
         "Rating": f"{rating_val}/10",
         "Backdrop": res.get('bannerImage', ''),
         "Total_Eps": total,
-        "ID": None # Not needed for AniList deep fetch as we already have total
+        "ID": None
     })
 
 # --- UI START ---
@@ -303,6 +317,9 @@ st.title("🎬 Ultimate Media Tracker")
 
 sheet = get_google_sheet()
 if "refresh_key" not in st.session_state: st.session_state.refresh_key = 0
+
+if 'search_results' not in st.session_state: st.session_state.search_results = []
+if 'search_page' not in st.session_state: st.session_state.search_page = 1
 
 tab = st.sidebar.radio("Menu", ["My Gallery", "Search & Add"], key="main_nav")
 GENRES = ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Mystery", "Romance", "Sci-Fi", "Sports", "Thriller", "War"]
@@ -316,18 +333,22 @@ if tab == "Search & Add":
         with c1: search_query = st.text_input("Title (Optional)", placeholder="Leave empty to discover...")
         with c2: selected_types = st.multiselect("Type", ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Manga", "Manhwa", "Manhua"], default=["Movies"])
         with c3: selected_genres = st.multiselect("Genre", GENRES)
-        with c4: min_rating = st.slider("Min Rating", 0, 10, 0)
+        with c4: 
+            # REPLACED SLIDER WITH SORT SELECTBOX
+            sort_option = st.selectbox("Sort By", ["Popularity", "Relevance", "Top Rated"])
         
         if st.button("🚀 Search / Discover"):
+            st.session_state.search_page = 1
+            st.session_state.search_results = []
             with st.spinner("Fetching..."):
                 if not selected_types: selected_types = ["Movies"]
-                results = search_unified(search_query, selected_types, selected_genres, min_rating)
+                results = search_unified(search_query, selected_types, selected_genres, sort_option, page=1)
+                st.session_state.search_results = results
             
-            if not results: st.warning("No results found.")
-            else: st.session_state['last_results'] = results
+            if not st.session_state.search_results: st.warning("No results found.")
 
-    if 'last_results' in st.session_state:
-        for idx, item in enumerate(st.session_state['last_results']):
+    if st.session_state.search_results:
+        for idx, item in enumerate(st.session_state.search_results):
             with st.container():
                 col_img, col_txt = st.columns([1, 6])
                 with col_img:
@@ -345,6 +366,13 @@ if tab == "Search & Add":
                         else: st.toast("❌ Error saving.")
             st.divider()
 
+        if st.button("⬇️ Load More Results"):
+            st.session_state.search_page += 1
+            with st.spinner(f"Loading Page {st.session_state.search_page}..."):
+                new_results = search_unified(search_query, selected_types, selected_genres, sort_option, page=st.session_state.search_page)
+                st.session_state.search_results.extend(new_results)
+                st.rerun()
+
 # --- GALLERY TAB ---
 elif tab == "My Gallery":
     st.subheader("My Library")
@@ -358,7 +386,6 @@ elif tab == "My Gallery":
             safe_rows = []
             for row in raw_data[1:]:
                 if not row or not row[0].strip(): continue
-                # Pad rows to match new header length
                 if len(row) < len(HEADERS): row += [""] * (len(HEADERS) - len(row))
                 safe_rows.append(row[:len(HEADERS)])
             
@@ -403,7 +430,6 @@ elif tab == "My Gallery":
                                     try: c_ep = int(item.get('Current_Ep', 0))
                                     except: c_ep = 0
 
-                                    # Get Totals
                                     tot_eps = item.get('Total_Eps', '?')
                                     tot_sea = item.get('Total_Seasons', '?')
 
