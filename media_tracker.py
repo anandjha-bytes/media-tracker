@@ -5,6 +5,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from tmdbv3api import TMDb, Movie, TV, Search, Genre, Discover
 import requests
 import time
+import urllib.parse
 
 # --- CONFIGURATION ---
 try:
@@ -138,9 +139,29 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-# --- STREAMING & ID RECOVERY LOGIC ---
+# --- LINK GENERATORS ---
+def generate_provider_link(provider_name, title):
+    """Generates a search link for major streaming services"""
+    q = urllib.parse.quote(title)
+    p = provider_name.lower()
+    
+    if 'netflix' in p: return f"https://www.netflix.com/search?q={q}"
+    if 'disney' in p: return f"https://www.disneyplus.com/search?q={q}"
+    if 'amazon' in p or 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
+    if 'hulu' in p: return f"https://www.hulu.com/search?q={q}"
+    if 'apple' in p: return f"https://tv.apple.com/search?term={q}"
+    if 'hbo' in p or 'max' in p: return f"https://www.max.com/search?q={q}"
+    if 'google' in p or 'play' in p: return f"https://play.google.com/store/search?q={q}&c=movies"
+    if 'youtube' in p: return f"https://www.youtube.com/results?search_query={q}"
+    if 'crunchyroll' in p: return f"https://www.crunchyroll.com/search?q={q}"
+    if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
+    if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
+    if 'sony' in p or 'liv' in p: return f"https://www.sonyliv.com/search?q={q}"
+    if 'zee5' in p: return f"https://www.zee5.com/search?q={q}"
+    
+    return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
+
 def recover_tmdb_id(title, media_type):
-    """Searches for ID if missing from sheet"""
     search = Search()
     try:
         if media_type == 'movie': results = search.movies(title)
@@ -151,8 +172,6 @@ def recover_tmdb_id(title, media_type):
 
 def get_streaming_info(tmdb_id, media_type, country_code):
     if not tmdb_id: return None
-    
-    # Ensure ID is an integer string
     try: clean_id = int(float(tmdb_id))
     except: return None
 
@@ -162,15 +181,33 @@ def get_streaming_info(tmdb_id, media_type, country_code):
         data = r.json()
         if 'results' in data and country_code in data['results']:
             return data['results'][country_code]
-        else:
-            return "No Info"
+        else: return "No Info"
     except: return None
+
+def fetch_anime_links(title):
+    """Live fetch of anime links for library items"""
+    query = '''
+    query ($s: String) {
+        Page(perPage: 1) {
+            media(search: $s, type: ANIME) {
+                externalLinks { site url }
+            }
+        }
+    }
+    '''
+    try:
+        r = requests.post('https://graphql.anilist.co', json={'query': query, 'variables': {'s': title}})
+        data = r.json()
+        if data['data']['Page']['media']:
+            return data['data']['Page']['media'][0].get('externalLinks', [])
+    except: pass
+    return []
 
 # --- SEARCH ENGINE ---
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # 1. TMDB (MOVIES/TV)
+    # 1. TMDB
     live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -188,12 +225,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
 
         if not query:
             discover = Discover()
-            kwargs = {
-                'sort_by': tmdb_sort, 
-                'with_genres': g_ids, 
-                'page': page,
-                'vote_count.gte': 50
-            }
+            kwargs = {'sort_by': tmdb_sort, 'with_genres': g_ids, 'page': page, 'vote_count.gte': 50}
             if lang: kwargs['with_original_language'] = lang
 
             if "Movies" in selected_types:
@@ -218,10 +250,9 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             
             if sort_option == "Top Rated":
                 current_results.sort(key=lambda x: float(x['Rating'].split('/')[0]), reverse=True)
-            
             results_data.extend(current_results)
 
-    # 2. ANILIST (ANIME/MANGA)
+    # 2. ANILIST
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
@@ -231,15 +262,11 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         for m in set(modes):
             country_filter = None
             if m == "MANGA":
-                if "Manhwa" in selected_types and "Manga" not in selected_types and "Manhua" not in selected_types:
-                    country_filter = "KR" 
-                elif "Manhua" in selected_types and "Manga" not in selected_types and "Manhwa" not in selected_types:
-                    country_filter = "CN" 
-                elif "Manga" in selected_types and "Manhwa" not in selected_types and "Manhua" not in selected_types:
-                    country_filter = "JP" 
+                if "Manhwa" in selected_types and "Manga" not in selected_types and "Manhua" not in selected_types: country_filter = "KR" 
+                elif "Manhua" in selected_types and "Manga" not in selected_types and "Manhwa" not in selected_types: country_filter = "CN" 
+                elif "Manga" in selected_types and "Manhwa" not in selected_types and "Manhua" not in selected_types: country_filter = "JP" 
 
             q_val = query if query else None 
-            
             for r in fetch_anilist(q_val, m, selected_genres, sort_option, page, country_filter): 
                 process_anilist(r, m, results_data, selected_types, selected_genres)
 
@@ -287,11 +314,7 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
     
-    variables = {
-        't': type_, 
-        'p': page, 
-        'sort': [anilist_sort]
-    }
+    variables = {'t': type_, 'p': page, 'sort': [anilist_sort]}
     
     query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
     media_args = ["type: $t", "sort: $sort"]
@@ -300,12 +323,10 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
         query_args.append("$s: String")
         media_args.append("search: $s")
         variables['s'] = query
-        
     if genres:
         query_args.append("$g: [String]")
         media_args.append("genre_in: $g")
         variables['g'] = genres
-        
     if country:
         query_args.append("$c: CountryCode")
         media_args.append("countryOfOrigin: $c")
@@ -316,17 +337,15 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
       Page(page: $p, perPage: 15) {{ 
         media({', '.join(media_args)}) {{ 
           title {{ romaji english }} coverImage {{ large }} bannerImage genres countryOfOrigin type description averageScore episodes chapters 
+          externalLinks {{ site url }}
         }} 
       }} 
     }}
     '''
-
     try:
         r = requests.post('https://graphql.anilist.co', json={'query': query_str, 'variables': variables})
-        if r.status_code == 200:
-            return r.json()['data']['Page']['media']
-        else:
-            return []
+        if r.status_code == 200: return r.json()['data']['Page']['media']
+        else: return []
     except: return []
 
 def process_anilist(res, api_type, results_list, selected_types, selected_genres):
@@ -365,7 +384,8 @@ def process_anilist(res, api_type, results_list, selected_types, selected_genres
         "Rating": f"{rating_val}/10",
         "Backdrop": res.get('bannerImage', ''),
         "Total_Eps": total,
-        "ID": None
+        "ID": None,
+        "Links": res.get('externalLinks', [])
     })
 
 # --- UI START ---
@@ -390,8 +410,7 @@ if tab == "Search & Add":
         with c1: search_query = st.text_input("Title (Optional)", placeholder="Leave empty to discover...")
         with c2: selected_types = st.multiselect("Type", ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Manga", "Manhwa", "Manhua"], default=["Movies"])
         with c3: selected_genres = st.multiselect("Genre", GENRES)
-        with c4: 
-            sort_option = st.selectbox("Sort By", ["Popularity", "Relevance", "Top Rated"])
+        with c4: sort_option = st.selectbox("Sort By", ["Popularity", "Relevance", "Top Rated"])
         
         if st.button("🚀 Search / Discover"):
             st.session_state.search_page = 1
@@ -448,7 +467,6 @@ elif tab == "My Gallery":
             df = pd.DataFrame(safe_rows, columns=HEADERS)
             
             with st.expander("Filter Collection", expanded=False):
-                # COUNTRY SELECTOR
                 c_sel, c_txt, c_type, c_gen = st.columns([2, 2, 2, 2])
                 with c_sel:
                     default_idx = list(tmdb_countries.keys()).index("India") if "India" in tmdb_countries else 0
@@ -488,10 +506,9 @@ elif tab == "My Gallery":
                                     except: c_sea = 1
                                     try: c_ep = int(item.get('Current_Ep', 0))
                                     except: c_ep = 0
-
+                                    
                                     tot_eps = item.get('Total_Eps', '?')
                                     tot_sea = item.get('Total_Seasons', '?')
-
                                     is_manga = "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']
                                     
                                     col_sea, col_ep = st.columns(2)
@@ -526,34 +543,54 @@ elif tab == "My Gallery":
                                     search_url = f"https://www.google.com/search?q=site:comix.to+{item['Title'].replace(' ', '+')}"
                                     st.link_button("📖 Read on Comix.to", search_url)
                                 
-                                # --- STREAMING BUTTON (Movies/TV) ---
+                                # --- ANIME STREAMING ---
+                                elif item['Type'] == "Anime":
+                                    st.write(f"**Streaming:**")
+                                    # Fetch links freshly from AniList since we don't save them in sheet
+                                    links = fetch_anime_links(item['Title'])
+                                    
+                                    has_crunchyroll = False
+                                    if links:
+                                        for link in links:
+                                            if 'crunchyroll' in link['site'].lower():
+                                                has_crunchyroll = True
+                                                st.link_button(f"🟠 {link['site']}", link['url'])
+                                            else:
+                                                st.link_button(f"🔗 {link['site']}", link['url'])
+                                    
+                                    if not has_crunchyroll:
+                                        g_search = f"https://www.google.com/search?q=watch+{item['Title'].replace(' ', '+')}+anime+online"
+                                        st.link_button("🔍 Search Google (Crunchyroll Not Found)", g_search)
+
+                                # --- MOVIES/TV STREAMING ---
                                 elif item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
                                     if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{item['Title']}_{idx}"):
-                                        # ID Recovery
                                         tmdb_id = item.get('ID')
+                                        m_type = 'movie' if item['Type'] == "Movies" else 'tv'
+                                        
+                                        # Auto-Recover ID if missing
                                         if not tmdb_id or str(tmdb_id).strip() == "":
-                                            m_type = 'movie' if item['Type'] == "Movies" else 'tv'
                                             tmdb_id = recover_tmdb_id(item['Title'], m_type)
                                         
-                                        # Fetch Logic
-                                        m_type = 'movie' if item['Type'] == "Movies" else 'tv'
                                         provs = get_streaming_info(tmdb_id, m_type, country_code)
                                         
                                         if not provs or provs == "No Info":
                                             st.warning(f"Not available to stream in {stream_country} or Data Missing.")
-                                            # Fallback Search
                                             g_search = f"https://www.google.com/search?q=watch+{item['Title'].replace(' ', '+')}+online"
                                             st.link_button("🔍 Search Google", g_search)
                                         else:
-                                            if 'flatrate' in provs:
-                                                st.write("🟢 **Stream:**")
-                                                for p in provs['flatrate']: st.write(f"- {p['provider_name']}")
-                                            if 'rent' in provs:
-                                                st.write("🟡 **Rent:**")
-                                                for p in provs['rent']: st.write(f"- {p['provider_name']}")
-                                            if 'buy' in provs:
-                                                st.write("🔵 **Buy:**")
-                                                for p in provs['buy']: st.write(f"- {p['provider_name']}")
+                                            # Helper to render links
+                                            def show_links(category_name, providers, icon):
+                                                if providers:
+                                                    st.write(f"{icon} **{category_name}:**")
+                                                    for p in providers:
+                                                        p_name = p['provider_name']
+                                                        p_link = generate_provider_link(p_name, item['Title'])
+                                                        st.markdown(f"- [{p_name}]({p_link})")
+
+                                            show_links("Stream", provs.get('flatrate'), "🟢")
+                                            show_links("Rent", provs.get('rent'), "🟡")
+                                            show_links("Buy", provs.get('buy'), "🔵")
                                             
                                             if 'flatrate' not in provs and 'rent' not in provs and 'buy' not in provs:
                                                 st.info("No direct streaming options found.")
