@@ -38,7 +38,7 @@ def get_tmdb_genres():
 
 tmdb_id_map, tmdb_name_map = get_tmdb_genres()
 
-# --- GOOGLE SHEETS CONNECTION ---
+# --- GOOGLE SHEETS CONNECTION & AUTO-FIX ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
@@ -51,7 +51,19 @@ def get_google_sheet():
             return None
     client = gspread.authorize(creds)
     try:
-        return client.open(GOOGLE_SHEET_NAME).sheet1
+        sheet = client.open(GOOGLE_SHEET_NAME).sheet1
+        
+        # --- AUTO-FIX HEADERS ---
+        # If the sheet is empty, we automatically add the correct headers
+        if not sheet.get_all_values():
+            headers = [
+                "Title", "Type", "Country", "Status", "Genres", "Image", 
+                "Overview", "Rating", "Backdrop", "Current_Season", 
+                "Current_Ep", "Total_Eps"
+            ]
+            sheet.append_row(headers)
+            
+        return sheet
     except:
         return None
 
@@ -60,7 +72,7 @@ def add_to_sheet(item):
     sheet = get_google_sheet()
     if sheet:
         try:
-            # Columns: Title, Type, Country, Status, Genres, Image, Overview, Rating, Backdrop, Season, Ep, Total
+            # Columns must match the Auto-Fix Headers exactly
             row_data = [
                 item['Title'], 
                 item['Type'], 
@@ -319,16 +331,11 @@ elif tab == "My Gallery":
     if st.button("🔄 Refresh"): st.cache_data.clear()
     
     if sheet:
-        # --- THE FIX IS HERE: SAFER DATA LOADING ---
-        # We fetch all values as a raw list of lists to avoid GSpreadException
         raw_data = sheet.get_all_values()
         
-        # Check if we have data (Header row + at least 1 data row)
         if len(raw_data) > 1:
             headers = raw_data[0]
             rows = raw_data[1:]
-            
-            # Create DataFrame safely
             df = pd.DataFrame(rows, columns=headers)
             
             with st.expander("Filter Collection", expanded=False):
@@ -354,8 +361,11 @@ elif tab == "My Gallery":
                     cols = st.columns(cols_per_row)
                     for idx, (_, item) in enumerate(row.iterrows()):
                         with cols[idx]:
-                            img_url = item.get('Image', '')
-                            if not str(img_url).startswith("http"): img_url = "https://via.placeholder.com/200x300?text=No+Image"
+                            # --- ROBUST IMAGE HANDLING ---
+                            img_url = str(item.get('Image', '')).strip()
+                            if not img_url.startswith("http"):
+                                img_url = "https://via.placeholder.com/200x300?text=No+Image"
+                            
                             st.image(img_url, use_container_width=True)
                             st.markdown(f"**{item['Title']}**")
                             
@@ -366,11 +376,10 @@ elif tab == "My Gallery":
                                 new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}_{idx}", index=opts.index(curr))
                                 
                                 if item['Type'] != "Movies":
-                                    # Safe Convert Season
+                                    # Convert to int safely
                                     try: c_sea = int(item.get('Current_Season', 1))
                                     except: c_sea = 1
                                     
-                                    # Safe Convert Episode
                                     try: c_ep = int(item.get('Current_Ep', 0))
                                     except: c_ep = 0
 
@@ -402,8 +411,9 @@ elif tab == "My Gallery":
                                         st.rerun()
                             
                             with st.popover("📜 Info"):
-                                if str(item.get('Backdrop')).startswith("http"):
-                                    st.image(item['Backdrop'], use_container_width=True)
+                                bd = str(item.get('Backdrop', '')).strip()
+                                if bd.startswith("http"):
+                                    st.image(bd, use_container_width=True)
                                 st.write(f"Rating: {item.get('Rating')}")
                                 st.write(item.get('Overview'))
             else: st.info("No matches.")
