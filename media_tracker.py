@@ -151,33 +151,27 @@ def reorder_sheet(title, direction):
 
         curr_row = cell.row
         
-        # Calculate target row (1-based index)
         if direction == 'up':
             target_row = curr_row - 1
         else:
             target_row = curr_row + 1
 
-        # Bounds Check (Row 1 is Header)
         if target_row < 2 or target_row > len(sheet.get_all_values()):
             st.toast("⚠️ Cannot move further.")
             return
 
-        # Fetch Data
         curr_vals = sheet.row_values(curr_row)
         target_vals = sheet.row_values(target_row)
         
-        # Ensure we don't lose columns if one row is shorter
         def pad_row(r): return r + [""] * (14 - len(r))
         curr_vals = pad_row(curr_vals)
         target_vals = pad_row(target_vals)
 
-        # Swap using update (Standard Gspread)
-        # Note: Range is A to N (14 columns)
         sheet.update(range_name=f"A{curr_row}:N{curr_row}", values=[target_vals])
         sheet.update(range_name=f"A{target_row}:N{target_row}", values=[curr_vals])
         
         st.toast(f"Moved {direction}: {title}")
-        time.sleep(1) # Wait for API
+        time.sleep(1)
         st.rerun()
     except Exception as e:
         st.error(f"Move Error: {e}")
@@ -261,7 +255,7 @@ def get_tmdb_trailer(tmdb_id, media_type):
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # TMDB Search Logic
+    # TMDB Search
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -307,7 +301,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                 current_results.sort(key=lambda x: float(x['Rating'].split('/')[0]), reverse=True)
             results_data.extend(current_results)
 
-    # AniList Search Logic
+    # AniList Search
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
@@ -519,7 +513,8 @@ elif tab == "My Gallery":
             st.divider()
             
             if not df.empty:
-                cols_per_row = 4
+                # CHANGED: 6 Columns per Row
+                cols_per_row = 6
                 rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
                 for row_chunk in rows:
                     cols = st.columns(cols_per_row)
@@ -541,39 +536,7 @@ elif tab == "My Gallery":
                             
                             unique_key = f"{index}"
                             
-                            with st.expander("⚙️ Manage"):
-                                opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
-                                curr = item.get('Status', 'Plan to Watch')
-                                if curr not in opts: curr = "Plan to Watch"
-                                new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
-                                
-                                if item['Type'] != "Movies":
-                                    try: c_sea = int(item.get('Current_Season', 1))
-                                    except: c_sea = 1
-                                    try: c_ep = int(item.get('Current_Ep', 0))
-                                    except: c_ep = 0
-                                    
-                                    # DYNAMIC LABELS FOR MANGA/MANHWA
-                                    if item['Type'] in ["Manga", "Manhwa", "Manhua"]:
-                                        sea_label, ep_label = "Volume", "Chapter"
-                                    else:
-                                        sea_label, ep_label = "Season", "Episode"
-
-                                    col_s, col_e = st.columns(2)
-                                    with col_s: new_sea = st.number_input(sea_label, min_value=1, value=c_sea, key=f"s_{unique_key}")
-                                    with col_e: new_ep = st.number_input(ep_label, min_value=0, value=c_ep, key=f"e_{unique_key}")
-                                else: new_sea, new_ep = 1, 0
-
-                                c_sv, c_dl = st.columns(2)
-                                with c_sv: 
-                                    if st.button("Save", key=f"sv_{unique_key}"):
-                                        update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
-                                        st.rerun()
-                                with c_dl:
-                                    if st.button("Del", key=f"dl_{unique_key}"):
-                                        delete_from_sheet(item['Title'])
-                                        st.rerun()
-                            
+                            # ORDER SWAP: Streaming First, then Manage
                             with st.popover("📜 Overview & Streaming"):
                                 # TRAILER
                                 tmdb_id = item.get('ID')
@@ -587,7 +550,7 @@ elif tab == "My Gallery":
                                     if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
                                         st.video(f"https://www.youtube.com/watch?v={details['trailer']['id']}")
                                     
-                                    # NEW: Anikai.to Button
+                                    # Anikai Button
                                     anikai_url = f"https://www.google.com/search?q=site:anikai.to+{item['Title'].replace(' ', '+')}"
                                     st.link_button("📺 Watch on Anikai.to", anikai_url)
 
@@ -630,6 +593,39 @@ elif tab == "My Gallery":
                                 
                                 st.write(f"**Rating:** {item.get('Rating')}")
                                 st.write(item.get('Overview'))
+
+                            with st.expander("⚙️ Manage"):
+                                opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
+                                curr = item.get('Status', 'Plan to Watch')
+                                if curr not in opts: curr = "Plan to Watch"
+                                new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
+                                
+                                if item['Type'] != "Movies":
+                                    try: c_sea = int(item.get('Current_Season', 1))
+                                    except: c_sea = 1
+                                    try: c_ep = int(item.get('Current_Ep', 0))
+                                    except: c_ep = 0
+                                    
+                                    # DYNAMIC LABELS FOR MANGA/MANHWA
+                                    if item['Type'] in ["Manga", "Manhwa", "Manhua"]:
+                                        sea_label, ep_label = "Vol.", "Ch."
+                                    else:
+                                        sea_label, ep_label = "S", "E"
+
+                                    col_s, col_e = st.columns(2)
+                                    with col_s: new_sea = st.number_input(sea_label, min_value=1, value=c_sea, key=f"s_{unique_key}")
+                                    with col_e: new_ep = st.number_input(ep_label, min_value=0, value=c_ep, key=f"e_{unique_key}")
+                                else: new_sea, new_ep = 1, 0
+
+                                c_sv, c_dl = st.columns(2)
+                                with c_sv: 
+                                    if st.button("Save", key=f"sv_{unique_key}"):
+                                        update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
+                                        st.rerun()
+                                with c_dl:
+                                    if st.button("Del", key=f"dl_{unique_key}"):
+                                        delete_from_sheet(item['Title'])
+                                        st.rerun()
             else: st.info("No items.")
         else: st.info("Library Empty.")
     else: st.error("Connection Failed. Check Secrets.")
