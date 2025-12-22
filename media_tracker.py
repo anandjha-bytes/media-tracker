@@ -254,27 +254,34 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
     
-    variables = {'t': type_, 'p': page, 'sort': [anilist_sort]}
-    args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
+    # 1. Start with base variables
+    variables = {
+        't': type_, 
+        'p': page, 
+        'sort': [anilist_sort]
+    }
+    
+    # 2. Build Query DYNAMICALLY to avoid syntax errors
+    query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
     media_args = ["type: $t", "page: $p", "sort: $sort"]
     
     if query:
-        args.append("$s: String")
+        query_args.append("$s: String")
         media_args.append("search: $s")
         variables['s'] = query
         
     if genres:
-        args.append("$g: [String]")
+        query_args.append("$g: [String]")
         media_args.append("genre_in: $g")
         variables['g'] = genres
         
     if country:
-        args.append("$c: CountryCode")
+        query_args.append("$c: CountryCode")
         media_args.append("countryOfOrigin: $c")
         variables['c'] = country
 
     query_str = f'''
-    query ({', '.join(args)}) {{ 
+    query ({', '.join(query_args)}) {{ 
       Page(perPage: 15) {{ 
         media({', '.join(media_args)}) {{ 
           title {{ romaji english }} coverImage {{ large }} bannerImage genres countryOfOrigin type description averageScore episodes chapters 
@@ -285,7 +292,10 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
 
     try:
         r = requests.post('https://graphql.anilist.co', json={'query': query_str, 'variables': variables})
-        return r.json()['data']['Page']['media']
+        if r.status_code == 200:
+            return r.json()['data']['Page']['media']
+        else:
+            return []
     except: return []
 
 def process_anilist(res, api_type, results_list, selected_types, selected_genres):
@@ -477,7 +487,7 @@ elif tab == "My Gallery":
                                 bd = str(item.get('Backdrop', '')).strip()
                                 if bd.startswith("http"): st.image(bd, use_container_width=True)
                                 
-                                # --- READ BUTTON (NEW) ---
+                                # --- READ BUTTON FOR MANGA/MANHWA ---
                                 if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
                                     search_url = f"https://comix.to/search?q={item['Title'].replace(' ', '+')}"
                                     st.link_button("📖 Read on Comix.to", search_url)
