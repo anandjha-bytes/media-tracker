@@ -42,6 +42,7 @@ tmdb_id_map, tmdb_name_map = get_tmdb_genres()
 # --- GOOGLE SHEETS CONNECTION ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = None
     try:
         if "gcp_service_account" in st.secrets:
             creds_dict = st.secrets["gcp_service_account"]
@@ -54,7 +55,7 @@ def get_google_sheet():
         client = gspread.authorize(creds)
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
         
-        # Auto-Repair Headers
+        # --- AUTO-REPAIR HEADERS ---
         vals = sheet.get_all_values()
         REQUIRED_HEADERS = [
             "Title", "Type", "Country", "Status", "Genres", "Image", 
@@ -129,7 +130,7 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-# --- SEARCH ENGINE ---
+# --- SEARCH ENGINE (SMART DISCOVERY) ---
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
@@ -150,7 +151,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         if sort_option == 'Top Rated': tmdb_sort = 'vote_average.desc'
 
         if not query:
-            # DISCOVERY
+            # DISCOVERY MODE
             discover = Discover()
             kwargs = {
                 'sort_by': tmdb_sort, 
@@ -169,7 +170,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                     for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres)
                 except: pass
         else:
-            # SEARCH
+            # SEARCH MODE
             search = Search()
             current_results = []
             if "Movies" in selected_types:
@@ -191,21 +192,18 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     if any(t in selected_types for t in asian_comics):
         modes = []
         if "Anime" in selected_types: modes.append("ANIME")
-        
-        # Special handling for Manga/Manhwa/Manhua to ensure discovery works
-        if any(t in ["Manga", "Manhwa", "Manhua"] for t in selected_types):
-            modes.append("MANGA")
+        if any(t in ["Manga", "Manhwa", "Manhua"] for t in selected_types): modes.append("MANGA")
         
         for m in set(modes):
-            # Calculate strict country code to fix Discovery for Manhwa/Manhua
+            # STRICT COUNTRY FILTERING FOR MANHWA/MANHUA
             country_filter = None
             if m == "MANGA":
                 if "Manhwa" in selected_types and "Manga" not in selected_types and "Manhua" not in selected_types:
-                    country_filter = "KR"
+                    country_filter = "KR" # Force Korea
                 elif "Manhua" in selected_types and "Manga" not in selected_types and "Manhwa" not in selected_types:
-                    country_filter = "CN"
+                    country_filter = "CN" # Force China
                 elif "Manga" in selected_types and "Manhwa" not in selected_types and "Manhua" not in selected_types:
-                    country_filter = "JP"
+                    country_filter = "JP" # Force Japan
 
             q_val = query if query else None 
             
@@ -252,20 +250,11 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres)
     })
 
 def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, country=None):
-    # Sort Mapping
     anilist_sort = "POPULARITY_DESC"
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
     
-    # 1. Base Variables
-    variables = {
-        't': type_, 
-        'p': page, 
-        'sort': [anilist_sort]
-    }
-    
-    # 2. Build Query
-    # Note: AniList GraphQL is strict. We use dynamic args.
+    variables = {'t': type_, 'p': page, 'sort': [anilist_sort]}
     args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
     media_args = ["type: $t", "page: $p", "sort: $sort"]
     
@@ -317,8 +306,10 @@ def process_anilist(res, api_type, results_list, selected_types, selected_genres
     rating_val = score / 10 if score else 0
 
     res_genres = res.get('genres', [])
-    # No extra filtering needed here if the API did its job, but safe to keep
-    
+    if selected_genres:
+        res_str = ", ".join(res_genres).lower()
+        if not any(s.lower() in res_str for s in selected_genres): return
+
     import re
     raw = res.get('description', '')
     clean = re.sub('<[^<]+?>', '', raw) if raw else "No description."
@@ -485,6 +476,12 @@ elif tab == "My Gallery":
                             with st.popover("📜 Info"):
                                 bd = str(item.get('Backdrop', '')).strip()
                                 if bd.startswith("http"): st.image(bd, use_container_width=True)
+                                
+                                # --- READ BUTTON (NEW) ---
+                                if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
+                                    search_url = f"https://comix.to/search?q={item['Title'].replace(' ', '+')}"
+                                    st.link_button("📖 Read on Comix.to", search_url)
+                                
                                 st.write(f"Rating: {item.get('Rating')}")
                                 st.write(item.get('Overview'))
             else: st.info("No matches.")
