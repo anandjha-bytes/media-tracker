@@ -84,7 +84,6 @@ def fetch_details_and_add(item):
     total_eps = item['Total_Eps']
     media_id = item.get('ID') 
     
-    # Deep fetch for TV shows to get accurate counts
     if item['Type'] not in ["Movies", "Anime", "Manga", "Manhwa", "Manhua"] and media_id:
         try:
             tv_api = TV()
@@ -130,11 +129,11 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-# --- SEARCH ENGINE (SMART DISCOVERY) ---
+# --- SEARCH ENGINE ---
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # --- 1. TMDB (MOVIES/TV) ---
+    # 1. TMDB (MOVIES/TV)
     live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -151,7 +150,6 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         if sort_option == 'Top Rated': tmdb_sort = 'vote_average.desc'
 
         if not query:
-            # DISCOVERY MODE
             discover = Discover()
             kwargs = {
                 'sort_by': tmdb_sort, 
@@ -170,7 +168,6 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                     for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres)
                 except: pass
         else:
-            # SEARCH MODE
             search = Search()
             current_results = []
             if "Movies" in selected_types:
@@ -187,7 +184,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             
             results_data.extend(current_results)
 
-    # --- 2. ANILIST (ANIME/MANGA) ---
+    # 2. ANILIST (ANIME/MANGA)
     asian_comics = ["Anime", "Manga", "Manhwa", "Manhua"]
     if any(t in selected_types for t in asian_comics):
         modes = []
@@ -195,15 +192,15 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         if any(t in ["Manga", "Manhwa", "Manhua"] for t in selected_types): modes.append("MANGA")
         
         for m in set(modes):
-            # STRICT COUNTRY FILTERING FOR MANHWA/MANHUA
             country_filter = None
             if m == "MANGA":
+                # Strict Country Filter only if SINGLE type selected
                 if "Manhwa" in selected_types and "Manga" not in selected_types and "Manhua" not in selected_types:
-                    country_filter = "KR" # Force Korea
+                    country_filter = "KR" 
                 elif "Manhua" in selected_types and "Manga" not in selected_types and "Manhwa" not in selected_types:
-                    country_filter = "CN" # Force China
+                    country_filter = "CN" 
                 elif "Manga" in selected_types and "Manhwa" not in selected_types and "Manhua" not in selected_types:
-                    country_filter = "JP" # Force Japan
+                    country_filter = "JP" 
 
             q_val = query if query else None 
             
@@ -250,19 +247,20 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres)
     })
 
 def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, country=None):
+    # Sort Mapping
     anilist_sort = "POPULARITY_DESC"
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
     
-    # 1. Start with base variables
     variables = {
         't': type_, 
         'p': page, 
         'sort': [anilist_sort]
     }
     
-    # 2. Build Query DYNAMICALLY to avoid syntax errors
+    # Query Args (Definitions)
     query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
+    # Media Args (Usage)
     media_args = ["type: $t", "page: $p", "sort: $sort"]
     
     if query:
@@ -280,9 +278,10 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
         media_args.append("countryOfOrigin: $c")
         variables['c'] = country
 
+    # !!! CRITICAL FIX: Ensure 'page: $p' is inside the Page() brackets !!!
     query_str = f'''
     query ({', '.join(query_args)}) {{ 
-      Page(perPage: 15) {{ 
+      Page(page: $p, perPage: 15) {{ 
         media({', '.join(media_args)}) {{ 
           title {{ romaji english }} coverImage {{ large }} bannerImage genres countryOfOrigin type description averageScore episodes chapters 
         }} 
@@ -487,7 +486,7 @@ elif tab == "My Gallery":
                                 bd = str(item.get('Backdrop', '')).strip()
                                 if bd.startswith("http"): st.image(bd, use_container_width=True)
                                 
-                                # --- READ BUTTON FOR MANGA/MANHWA ---
+                                # Comix.to Button
                                 if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
                                     search_url = f"https://comix.to/search?q={item['Title'].replace(' ', '+')}"
                                     st.link_button("📖 Read on Comix.to", search_url)
