@@ -60,7 +60,6 @@ def add_to_sheet(item):
     sheet = get_google_sheet()
     if sheet:
         try:
-            # We explicitly define the row to ensure no mismatch errors
             row_data = [
                 item['Title'], 
                 item['Type'], 
@@ -77,7 +76,7 @@ def add_to_sheet(item):
             sheet.append_row(row_data)
             return True
         except Exception as e:
-            st.error(f"Error saving to Drive: {e}")
+            st.error(f"Error saving: {e}")
             return False
     return False
 
@@ -89,7 +88,7 @@ def update_status_in_sheet(title, new_status, new_ep):
             if cell:
                 sheet.update_cell(cell.row, 4, new_status)
                 sheet.update_cell(cell.row, 10, new_ep)
-                st.toast(f"✅ Saved: {title}")
+                st.toast(f"✅ Updated: {title} (Ep {new_ep})")
                 time.sleep(0.5)
         except: pass
 
@@ -111,20 +110,16 @@ def search_unified(query, selected_types, selected_genres, min_rating):
     # 1. TMDB LOGIC
     live_action = ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
-        
-        # Determine strict language filters for better discovery
         lang = None
         if "K-Drama" in selected_types and len(selected_types) == 1: lang = "ko"
         elif "C-Drama" in selected_types and len(selected_types) == 1: lang = "zh"
         elif "Thai Drama" in selected_types and len(selected_types) == 1: lang = "th"
 
-        # Prepare Genres
         g_ids = ""
         if selected_genres:
             ids = [str(tmdb_name_map.get(g)) for g in selected_genres if tmdb_name_map.get(g)]
             g_ids = ",".join(ids)
 
-        # MODE A: DISCOVERY (No Text)
         if not query:
             discover = Discover()
             kwargs = {'sort_by': 'popularity.desc', 'vote_average.gte': min_rating, 'with_genres': g_ids, 'page': 1}
@@ -140,13 +135,10 @@ def search_unified(query, selected_types, selected_genres, min_rating):
                     for r in discover.discover_tv_shows(kwargs): process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
                 except: pass
 
-        # MODE B: SEARCH (With Text)
         else:
             search = Search()
-            # We fetch 2 pages to increase chance of finding Asian dramas in global search
             if "Movies" in selected_types:
                 for r in search.movies(query): process_tmdb(r, "Movie", results_data, selected_types, selected_genres, min_rating)
-            
             if any(t in ["Western Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
                 for r in search.tv_shows(query): process_tmdb(r, "TV", results_data, selected_types, selected_genres, min_rating)
 
@@ -158,7 +150,6 @@ def search_unified(query, selected_types, selected_genres, min_rating):
         if any(t in ["Manga", "Manhwa", "Manhua"] for t in selected_types): modes.append("MANGA")
         
         for m in set(modes):
-            # If query is empty, we pass None to trigger pure discovery
             q_val = query if query else None 
             for r in fetch_anilist(q_val, m, selected_genres): 
                 process_anilist(r, m, results_data, selected_types, selected_genres, min_rating)
@@ -178,7 +169,6 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
         elif origin == 'ja': detected_type, country_disp = "J-Drama", "Japan"
     
     if detected_type not in selected_types: return
-    
     rating = getattr(res, 'vote_average', 0)
     if rating < min_rating: return
 
@@ -191,8 +181,6 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
 
     poster = getattr(res, 'poster_path', None)
     img_url = f"{tmdb_poster_base}{poster}" if poster else ""
-    backdrop = getattr(res, 'backdrop_path', None)
-    bd_url = f"{tmdb_backdrop_base}{backdrop}" if backdrop else ""
     
     results_list.append({
         "Title": getattr(res, 'title', getattr(res, 'name', 'Unknown')),
@@ -202,12 +190,11 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres,
         "Image": img_url,
         "Overview": getattr(res, 'overview', 'No overview.'),
         "Rating": f"{rating}/10",
-        "Backdrop": bd_url,
+        "Backdrop": f"{tmdb_backdrop_base}{getattr(res, 'backdrop_path', '')}",
         "Total_Eps": total_eps
     })
 
 def fetch_anilist(query, type_, genres=None):
-    # If no query, we REMOVE the 'search' parameter entirely to allow pure discovery
     if query:
         query_graphql = '''
         query ($s: String, $t: MediaType, $g: [String]) { 
@@ -220,7 +207,6 @@ def fetch_anilist(query, type_, genres=None):
         '''
         variables = {'s': query, 't': type_}
     else:
-        # Discovery Mode Query (No search term)
         query_graphql = '''
         query ($t: MediaType, $g: [String]) { 
           Page(perPage: 15) { 
@@ -252,7 +238,6 @@ def process_anilist(res, api_type, results_list, selected_types, selected_genres
         else: detected_type = "Manga"
     
     if detected_type not in selected_types: return
-
     score = res.get('averageScore', 0)
     rating_val = score / 10 if score else 0
     if rating_val < min_rating: return
@@ -307,7 +292,6 @@ if tab == "Search & Add":
             if not results: st.warning("No results found.")
             else: st.session_state['last_results'] = results
 
-    # Display Results (Persistent)
     if 'last_results' in st.session_state:
         for item in st.session_state['last_results']:
             with st.container():
@@ -320,16 +304,13 @@ if tab == "Search & Add":
                     st.caption(f"🏷️ {item['Genres']}")
                     st.write(item['Overview'][:250] + "...")
                     
-                    # FIX FOR ADD BUTTON: Direct Call
                     if st.button(f"➕ Add Library", key=f"add_{item['Title']}_{item['Type']}"):
                         success = add_to_sheet(item)
-                        if success:
-                            st.toast(f"✅ Saved: {item['Title']}")
-                        else:
-                            st.toast("❌ Error saving. Check connection.")
+                        if success: st.toast(f"✅ Saved: {item['Title']}")
+                        else: st.toast("❌ Error saving.")
             st.divider()
 
-# --- GALLERY TAB ---
+# --- GALLERY TAB (Updated with Number Input) ---
 elif tab == "My Gallery":
     st.subheader("My Library")
     if st.button("🔄 Refresh"): st.cache_data.clear()
@@ -346,7 +327,6 @@ elif tab == "My Gallery":
                 with f3: filter_genre = st.multiselect("Filter Genre", GENRES)
                 with f4: filter_status = st.multiselect("Status", ["Plan to Watch", "Watching", "Completed", "Dropped"])
             
-            # Apply Filters
             if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
             if filter_type: df = df[df['Type'].isin(filter_type)]
             if filter_status: df = df[df['Status'].isin(filter_status)]
@@ -374,24 +354,34 @@ elif tab == "My Gallery":
                                 if curr not in opts: curr = "Plan to Watch"
                                 new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}", index=opts.index(curr))
                                 
+                                # --- NEW NUMBER INPUT LOGIC ---
                                 c_ep = item.get('Current_Ep')
-                                if c_ep == '': c_ep = 0
+                                if c_ep == '' or pd.isna(c_ep): c_ep = 0
+                                else: c_ep = int(c_ep)
+
                                 new_e = c_ep
                                 if item['Type'] != "Movies":
-                                    c1, c2, c3 = st.columns([1, 1, 1])
-                                    with c1: 
-                                        if st.button("➖", key=f"m_{item['Title']}"): new_e = int(c_ep) - 1
-                                    with c2: st.markdown(f"<center>{c_ep}</center>", unsafe_allow_html=True)
-                                    with c3: 
-                                        if st.button("➕", key=f"p_{item['Title']}"): new_e = int(c_ep) + 1
-                                
+                                    label_text = "Chapters" if "Manga" in item['Type'] or "Manhwa" in item['Type'] else "Episodes"
+                                    # This allows TYPING the number directly
+                                    new_e = st.number_input(
+                                        label=f"{label_text} Watched:",
+                                        min_value=0, 
+                                        value=c_ep,
+                                        step=1,
+                                        key=f"num_{item['Title']}"
+                                    )
+                                    # Show total if available
+                                    total_eps = item.get('Total_Eps', '?')
+                                    st.caption(f"Total: {total_eps}")
+
+                                # --- ACTION BUTTONS ---
                                 c_sv, c_dl = st.columns([1, 1])
                                 with c_sv:
-                                    if st.button("💾", key=f"sv_{item['Title']}"):
+                                    if st.button("💾 Save", key=f"sv_{item['Title']}"):
                                         update_status_in_sheet(item['Title'], new_s, new_e)
                                         st.rerun()
                                 with c_dl:
-                                    if st.button("🗑️", key=f"dl_{item['Title']}"):
+                                    if st.button("🗑️ Del", key=f"dl_{item['Title']}"):
                                         delete_from_sheet(item['Title'])
                                         st.rerun()
                             
