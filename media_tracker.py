@@ -7,6 +7,13 @@ import requests
 import time
 import urllib.parse
 
+# --- TRY IMPORTING SORTABLES ---
+try:
+    from streamlit_sortables import sort_items
+    HAS_SORTABLES = True
+except ImportError:
+    HAS_SORTABLES = False
+
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
 st.title("🎬 Ultimate Media Tracker")
@@ -140,58 +147,37 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-def reorder_sheet(title, direction):
-    """Moves a row up or down by swapping content"""
+def bulk_update_order(new_df):
+    """Updates the entire sheet with the new order"""
     sheet = get_google_sheet()
     if not sheet: return
-
-    try:
-        cell = sheet.find(title)
-        if not cell: return
-
-        curr_row = cell.row
-        
-        if direction == 'up':
-            target_row = curr_row - 1
-        else:
-            target_row = curr_row + 1
-
-        if target_row < 2 or target_row > len(sheet.get_all_values()):
-            st.toast("⚠️ Cannot move further.")
-            return
-
-        curr_vals = sheet.row_values(curr_row)
-        target_vals = sheet.row_values(target_row)
-        
-        def pad_row(r): return r + [""] * (14 - len(r))
-        curr_vals = pad_row(curr_vals)
-        target_vals = pad_row(target_vals)
-
-        sheet.update(range_name=f"A{curr_row}:N{curr_row}", values=[target_vals])
-        sheet.update(range_name=f"A{target_row}:N{target_row}", values=[curr_vals])
-        
-        st.toast(f"Moved {direction}: {title}")
-        time.sleep(1)
-        st.rerun()
-    except Exception as e:
-        st.error(f"Move Error: {e}")
+    
+    # Keep header
+    header = sheet.row_values(1)
+    
+    # Prepare data (convert DF back to list of lists)
+    # Ensure all columns are strings for safety
+    data_to_upload = new_df.astype(str).values.tolist()
+    
+    # Clear and Update
+    sheet.clear()
+    sheet.append_row(header)
+    sheet.append_rows(data_to_upload)
+    st.toast("✅ Order Saved!")
+    time.sleep(1)
+    st.rerun()
 
 # --- HELPERS ---
 def generate_provider_link(provider_name, title):
     q = urllib.parse.quote(title)
     p = provider_name.lower()
-    
     if 'netflix' in p: return f"https://www.netflix.com/search?q={q}"
     if 'disney' in p: return f"https://www.disneyplus.com/search?q={q}"
     if 'amazon' in p or 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
-    if 'hulu' in p: return f"https://www.hulu.com/search?q={q}"
-    if 'apple' in p: return f"https://tv.apple.com/search?term={q}"
-    if 'hbo' in p or 'max' in p: return f"https://www.max.com/search?q={q}"
     if 'crunchyroll' in p: return f"https://www.crunchyroll.com/search?q={q}"
     if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
     if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
     if 'viki' in p: return f"https://www.viki.com/search?q={q}"
-    
     return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
 
 def recover_tmdb_id(title, media_type):
@@ -255,7 +241,6 @@ def get_tmdb_trailer(tmdb_id, media_type):
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # TMDB Search
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         lang = None
@@ -480,9 +465,12 @@ if tab == "Search & Add":
 # --- GALLERY TAB ---
 elif tab == "My Gallery":
     st.subheader("My Library")
-    if st.button("🔄 Refresh"): st.cache_data.clear()
     
+    # ---------------------------
+    #  DRAG & DROP REORDER AREA
+    # ---------------------------
     sheet = get_google_sheet()
+    
     if sheet:
         raw_data = sheet.get_all_values()
         HEADERS = ["Title", "Type", "Country", "Status", "Genres", "Image", "Overview", "Rating", "Backdrop", "Current_Season", "Current_Ep", "Total_Eps", "Total_Seasons", "ID"]
@@ -495,6 +483,20 @@ elif tab == "My Gallery":
                 safe_rows.append(row[:len(HEADERS)])
             df = pd.DataFrame(safe_rows, columns=HEADERS)
             
+            # --- SORTABLE COMPONENT ---
+            if HAS_SORTABLES:
+                with st.expander("≡ Drag & Drop Reorder", expanded=False):
+                    st.caption("Drag items to sort, then click 'Save Order'.")
+                    titles = df['Title'].tolist()
+                    sorted_titles = sort_items(titles)
+                    
+                    if st.button("💾 Save New Order"):
+                        # Reorder DF based on new title list
+                        new_df = df.set_index('Title').loc[sorted_titles].reset_index()
+                        bulk_update_order(new_df)
+            else:
+                if st.button("🔄 Refresh"): st.cache_data.clear()
+
             with st.expander("Filter Collection", expanded=False):
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
@@ -513,7 +515,6 @@ elif tab == "My Gallery":
             st.divider()
             
             if not df.empty:
-                # CHANGED: 5 Columns per Row
                 cols_per_row = 5
                 rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
                 for row_chunk in rows:
@@ -524,21 +525,10 @@ elif tab == "My Gallery":
                             if not img.startswith("http"): img = "https://via.placeholder.com/200x300?text=No+Image"
                             st.image(img, use_container_width=True)
                             
-                            # Title and Reorder Buttons
-                            c_title, c_up, c_down = st.columns([4, 1, 1])
-                            with c_title: st.markdown(f"**{item['Title']}**")
-                            with c_up:
-                                if st.button("↑", key=f"up_{index}"):
-                                    reorder_sheet(item['Title'], 'up')
-                            with c_down:
-                                if st.button("↓", key=f"down_{index}"):
-                                    reorder_sheet(item['Title'], 'down')
-                            
+                            st.markdown(f"**{item['Title']}**")
                             unique_key = f"{index}"
                             
-                            # SWAPPED: Overview First
                             with st.popover("📜 Overview & Streaming"):
-                                # TRAILER
                                 tmdb_id = item.get('ID')
                                 m_type = 'movie' if item['Type'] == "Movies" else 'tv'
                                 if not tmdb_id and item['Type'] not in ["Anime", "Manga", "Manhwa", "Manhua"]:
@@ -594,7 +584,6 @@ elif tab == "My Gallery":
                                 st.write(f"**Rating:** {item.get('Rating')}")
                                 st.write(item.get('Overview'))
 
-                            # SWAPPED: Manage Second
                             with st.expander("⚙️ Manage"):
                                 opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
                                 curr = item.get('Status', 'Plan to Watch')
@@ -607,7 +596,6 @@ elif tab == "My Gallery":
                                     try: c_ep = int(item.get('Current_Ep', 0))
                                     except: c_ep = 0
                                     
-                                    # DYNAMIC LABELS FOR MANGA/MANHWA
                                     if item['Type'] in ["Manga", "Manhwa", "Manhua"]:
                                         sea_label, ep_label = "Vol.", "Ch."
                                     else:
