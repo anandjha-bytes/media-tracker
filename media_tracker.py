@@ -25,7 +25,6 @@ tmdb_backdrop_base = "https://image.tmdb.org/t/p/w780"
 # --- CACHE GENRES & COUNTRIES ---
 @st.cache_data
 def get_tmdb_config():
-    # Fetch Genres
     try:
         movie_genres = Genre().movie_list()
         tv_genres = Genre().tv_list()
@@ -37,13 +36,10 @@ def get_tmdb_config():
     except:
         id_to_name, name_to_id = {}, {}
 
-    # Fetch Countries for Streaming Dropdown
     try:
         url = f"https://api.themoviedb.org/3/configuration/countries?api_key={TMDB_API_KEY}"
         resp = requests.get(url).json()
-        # Create dictionary: {'United States': 'US', 'India': 'IN'}
         countries = {c['english_name']: c['iso_3166_1'] for c in resp}
-        # Sort by name
         sorted_countries = dict(sorted(countries.items()))
     except:
         sorted_countries = {'United States': 'US', 'India': 'IN'}
@@ -142,23 +138,33 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-# --- STREAMING PROVIDER LOGIC ---
+# --- STREAMING & ID RECOVERY LOGIC ---
+def recover_tmdb_id(title, media_type):
+    """Searches for ID if missing from sheet"""
+    search = Search()
+    try:
+        if media_type == 'movie': results = search.movies(title)
+        else: results = search.tv_shows(title)
+        if results: return results[0].id
+    except: return None
+    return None
+
 def get_streaming_info(tmdb_id, media_type, country_code):
-    """Fetches streaming providers for a specific TMDB ID and Country"""
-    if not tmdb_id or media_type not in ['movie', 'tv']:
-        return None
-        
-    url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/watch/providers?api_key={TMDB_API_KEY}"
+    if not tmdb_id: return None
+    
+    # Ensure ID is an integer string
+    try: clean_id = int(float(tmdb_id))
+    except: return None
+
+    url = f"https://api.themoviedb.org/3/{media_type}/{clean_id}/watch/providers?api_key={TMDB_API_KEY}"
     try:
         r = requests.get(url)
         data = r.json()
-        
         if 'results' in data and country_code in data['results']:
             return data['results'][country_code]
         else:
             return "No Info"
-    except:
-        return None
+    except: return None
 
 # --- SEARCH ENGINE ---
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
@@ -445,7 +451,6 @@ elif tab == "My Gallery":
                 # COUNTRY SELECTOR
                 c_sel, c_txt, c_type, c_gen = st.columns([2, 2, 2, 2])
                 with c_sel:
-                    # Default to US if not found, or India if preferred
                     default_idx = list(tmdb_countries.keys()).index("India") if "India" in tmdb_countries else 0
                     stream_country = st.selectbox("🌎 Select Country for Streaming", list(tmdb_countries.keys()), index=default_idx)
                     country_code = tmdb_countries[stream_country]
@@ -524,28 +529,34 @@ elif tab == "My Gallery":
                                 # --- STREAMING BUTTON (Movies/TV) ---
                                 elif item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
                                     if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{item['Title']}_{idx}"):
+                                        # ID Recovery
                                         tmdb_id = item.get('ID')
+                                        if not tmdb_id or str(tmdb_id).strip() == "":
+                                            m_type = 'movie' if item['Type'] == "Movies" else 'tv'
+                                            tmdb_id = recover_tmdb_id(item['Title'], m_type)
+                                        
+                                        # Fetch Logic
                                         m_type = 'movie' if item['Type'] == "Movies" else 'tv'
                                         provs = get_streaming_info(tmdb_id, m_type, country_code)
                                         
                                         if not provs or provs == "No Info":
-                                            st.warning(f"Not available to stream in {stream_country}.")
+                                            st.warning(f"Not available to stream in {stream_country} or Data Missing.")
+                                            # Fallback Search
+                                            g_search = f"https://www.google.com/search?q=watch+{item['Title'].replace(' ', '+')}+online"
+                                            st.link_button("🔍 Search Google", g_search)
                                         else:
-                                            # Flatrate = Streaming
                                             if 'flatrate' in provs:
                                                 st.write("🟢 **Stream:**")
                                                 for p in provs['flatrate']: st.write(f"- {p['provider_name']}")
-                                            # Rent
                                             if 'rent' in provs:
                                                 st.write("🟡 **Rent:**")
                                                 for p in provs['rent']: st.write(f"- {p['provider_name']}")
-                                            # Buy
                                             if 'buy' in provs:
                                                 st.write("🔵 **Buy:**")
                                                 for p in provs['buy']: st.write(f"- {p['provider_name']}")
                                             
                                             if 'flatrate' not in provs and 'rent' not in provs and 'buy' not in provs:
-                                                st.info("No streaming data found.")
+                                                st.info("No direct streaming options found.")
 
                                 st.write(f"**Rating:** {item.get('Rating')}")
                                 st.write(item.get('Overview'))
