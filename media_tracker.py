@@ -539,9 +539,9 @@ elif tab == "My Gallery":
                                     
                                     # DYNAMIC LABELS FOR MANGA/MANHWA
                                     if item['Type'] in ["Manga", "Manhwa", "Manhua"]:
-                                        sea_label, ep_label = "Volume (S)", "Chapter (E)"
+                                        sea_label, ep_label = "Volume", "Chapter"
                                     else:
-                                        sea_label, ep_label = "Season (S)", "Episode (E)"
+                                        sea_label, ep_label = "Season", "Episode"
 
                                     col_s, col_e = st.columns(2)
                                     with col_s: new_sea = st.number_input(sea_label, min_value=1, value=c_sea, key=f"s_{unique_key}")
@@ -570,7 +570,12 @@ elif tab == "My Gallery":
                                     details = fetch_anime_details(item['Title'])
                                     if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
                                         st.video(f"https://www.youtube.com/watch?v={details['trailer']['id']}")
-                                    st.write("**Watch On:**")
+                                    
+                                    # NEW: Anikai.to Button
+                                    anikai_url = f"https://www.google.com/search?q=site:anikai.to+{item['Title'].replace(' ', '+')}"
+                                    st.link_button("📺 Watch on Anikai.to", anikai_url)
+
+                                    st.write("**Official Sources:**")
                                     links = details.get('externalLinks', [])
                                     found_cr = False
                                     if links:
