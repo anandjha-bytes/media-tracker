@@ -293,7 +293,9 @@ if tab == "Search & Add":
             else: st.session_state['last_results'] = results
 
     if 'last_results' in st.session_state:
-        for item in st.session_state['last_results']:
+        # !!! FIX FOR DUPLICATE ELEMENT ID ERROR !!!
+        # We use enumerate(..., start=1) to create a unique ID for every button
+        for idx, item in enumerate(st.session_state['last_results']):
             with st.container():
                 col_img, col_txt = st.columns([1, 6])
                 with col_img:
@@ -304,7 +306,8 @@ if tab == "Search & Add":
                     st.caption(f"🏷️ {item['Genres']}")
                     st.write(item['Overview'][:250] + "...")
                     
-                    if st.button(f"➕ Add Library", key=f"add_{item['Title']}_{item['Type']}"):
+                    # We append _{idx} to the key to make it 100% unique
+                    if st.button(f"➕ Add Library", key=f"add_{item['Title']}_{item['Type']}_{idx}"):
                         success = add_to_sheet(item)
                         if success: st.toast(f"✅ Saved: {item['Title']}")
                         else: st.toast("❌ Error saving.")
@@ -352,7 +355,7 @@ elif tab == "My Gallery":
                                 opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
                                 curr = item.get('Status', 'Plan to Watch')
                                 if curr not in opts: curr = "Plan to Watch"
-                                new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}", index=opts.index(curr))
+                                new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}_{idx}", index=opts.index(curr))
                                 
                                 # --- NEW NUMBER INPUT LOGIC ---
                                 c_ep = item.get('Current_Ep')
@@ -362,13 +365,13 @@ elif tab == "My Gallery":
                                 new_e = c_ep
                                 if item['Type'] != "Movies":
                                     label_text = "Chapters" if "Manga" in item['Type'] or "Manhwa" in item['Type'] else "Episodes"
-                                    # This allows TYPING the number directly
+                                    
                                     new_e = st.number_input(
                                         label=f"{label_text} Watched:",
                                         min_value=0, 
                                         value=c_ep,
                                         step=1,
-                                        key=f"num_{item['Title']}"
+                                        key=f"num_{item['Title']}_{idx}"
                                     )
                                     # Show total if available
                                     total_eps = item.get('Total_Eps', '?')
@@ -377,11 +380,11 @@ elif tab == "My Gallery":
                                 # --- ACTION BUTTONS ---
                                 c_sv, c_dl = st.columns([1, 1])
                                 with c_sv:
-                                    if st.button("💾 Save", key=f"sv_{item['Title']}"):
+                                    if st.button("💾 Save", key=f"sv_{item['Title']}_{idx}"):
                                         update_status_in_sheet(item['Title'], new_s, new_e)
                                         st.rerun()
                                 with c_dl:
-                                    if st.button("🗑️ Del", key=f"dl_{item['Title']}"):
+                                    if st.button("🗑️ Del", key=f"dl_{item['Title']}_{idx}"):
                                         delete_from_sheet(item['Title'])
                                         st.rerun()
                             
