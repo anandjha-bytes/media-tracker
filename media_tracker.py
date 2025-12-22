@@ -139,9 +139,8 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-# --- LINK GENERATORS ---
+# --- HELPERS: LINKS & TRAILERS ---
 def generate_provider_link(provider_name, title):
-    """Generates a smart search link for major streaming services"""
     q = urllib.parse.quote(title)
     p = provider_name.lower()
     
@@ -185,11 +184,13 @@ def get_streaming_info(tmdb_id, media_type, country_code):
         else: return "No Info"
     except: return None
 
-def fetch_anime_links(title):
+def fetch_anime_details(title):
+    """Fetches trailer AND links for Anime"""
     query = '''
     query ($s: String) {
         Page(perPage: 1) {
             media(search: $s, type: ANIME) {
+                trailer { id site }
                 externalLinks { site url }
             }
         }
@@ -199,9 +200,28 @@ def fetch_anime_links(title):
         r = requests.post('https://graphql.anilist.co', json={'query': query, 'variables': {'s': title}})
         data = r.json()
         if data['data']['Page']['media']:
-            return data['data']['Page']['media'][0].get('externalLinks', [])
+            return data['data']['Page']['media'][0]
     except: pass
-    return []
+    return {}
+
+def get_tmdb_trailer(tmdb_id, media_type):
+    """Fetches YouTube trailer key from TMDB"""
+    if not tmdb_id: return None
+    try:
+        clean_id = int(float(tmdb_id))
+        url = f"https://api.themoviedb.org/3/{media_type}/{clean_id}/videos?api_key={TMDB_API_KEY}"
+        r = requests.get(url)
+        data = r.json()
+        if 'results' in data:
+            for vid in data['results']:
+                if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
+                    return f"https://www.youtube.com/watch?v={vid['key']}"
+            # Fallback to Teaser if no Trailer
+            for vid in data['results']:
+                if vid['site'] == 'YouTube':
+                    return f"https://www.youtube.com/watch?v={vid['key']}"
+    except: return None
+    return None
 
 # --- SEARCH ENGINE ---
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
@@ -315,7 +335,6 @@ def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, coun
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
     
     variables = {'t': type_, 'p': page, 'sort': [anilist_sort]}
-    
     query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
     media_args = ["type: $t", "sort: $sort"]
     
@@ -535,8 +554,32 @@ elif tab == "My Gallery":
                                         st.rerun()
                             
                             with st.popover("📜 Info & Streaming"):
-                                bd = str(item.get('Backdrop', '')).strip()
-                                if bd.startswith("http"): st.image(bd, use_container_width=True)
+                                # TRAILER / BACKDROP LOGIC
+                                has_trailer = False
+                                
+                                # 1. TMDB Trailer
+                                if item['Type'] in ["Movies", "Western Series", "K-Drama", "C-Drama", "Thai Drama"]:
+                                    # Need ID for trailer
+                                    tmdb_id = item.get('ID')
+                                    m_type = 'movie' if item['Type'] == "Movies" else 'tv'
+                                    if not tmdb_id: tmdb_id = recover_tmdb_id(item['Title'], m_type)
+                                    
+                                    trailer_url = get_tmdb_trailer(tmdb_id, m_type)
+                                    if trailer_url:
+                                        st.video(trailer_url)
+                                        has_trailer = True
+
+                                # 2. Anime Trailer
+                                elif item['Type'] == "Anime":
+                                    details = fetch_anime_details(item['Title'])
+                                    if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
+                                        st.video(f"https://www.youtube.com/watch?v={details['trailer']['id']}")
+                                        has_trailer = True
+
+                                # 3. Fallback to Image
+                                if not has_trailer:
+                                    bd = str(item.get('Backdrop', '')).strip()
+                                    if bd.startswith("http"): st.image(bd, use_container_width=True)
                                 
                                 # --- MANGA / MANHWA ---
                                 if "Manga" in item['Type'] or "Manhwa" in item['Type'] or "Manhua" in item['Type']:
@@ -551,7 +594,8 @@ elif tab == "My Gallery":
                                 # --- ANIME ---
                                 elif item['Type'] == "Anime":
                                     st.write(f"**Streaming:**")
-                                    links = fetch_anime_links(item['Title'])
+                                    details = fetch_anime_details(item['Title'])
+                                    links = details.get('externalLinks', [])
                                     has_crunchyroll = False
                                     if links:
                                         for link in links:
@@ -570,9 +614,7 @@ elif tab == "My Gallery":
                                     if st.button(f"📺 Stream in {stream_country}?", key=f"stm_{item['Title']}_{idx}"):
                                         tmdb_id = item.get('ID')
                                         m_type = 'movie' if item['Type'] == "Movies" else 'tv'
-                                        
-                                        if not tmdb_id or str(tmdb_id).strip() == "":
-                                            tmdb_id = recover_tmdb_id(item['Title'], m_type)
+                                        if not tmdb_id: tmdb_id = recover_tmdb_id(item['Title'], m_type)
                                         
                                         provs = get_streaming_info(tmdb_id, m_type, country_code)
                                         
