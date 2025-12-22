@@ -38,7 +38,7 @@ def get_tmdb_genres():
 
 tmdb_id_map, tmdb_name_map = get_tmdb_genres()
 
-# --- GOOGLE SHEETS CONNECTION & AUTO-FIX ---
+# --- GOOGLE SHEETS CONNECTION ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
@@ -52,17 +52,6 @@ def get_google_sheet():
     client = gspread.authorize(creds)
     try:
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
-        
-        # --- AUTO-FIX HEADERS ---
-        # If the sheet is empty, we automatically add the correct headers
-        if not sheet.get_all_values():
-            headers = [
-                "Title", "Type", "Country", "Status", "Genres", "Image", 
-                "Overview", "Rating", "Backdrop", "Current_Season", 
-                "Current_Ep", "Total_Eps"
-            ]
-            sheet.append_row(headers)
-            
         return sheet
     except:
         return None
@@ -72,7 +61,6 @@ def add_to_sheet(item):
     sheet = get_google_sheet()
     if sheet:
         try:
-            # Columns must match the Auto-Fix Headers exactly
             row_data = [
                 item['Title'], 
                 item['Type'], 
@@ -83,8 +71,8 @@ def add_to_sheet(item):
                 item['Overview'],
                 item['Rating'], 
                 item['Backdrop'], 
-                1,  # Default Current_Season
-                0,  # Default Current_Ep
+                1, 
+                0, 
                 item['Total_Eps']
             ]
             sheet.append_row(row_data)
@@ -100,7 +88,7 @@ def update_status_in_sheet(title, new_status, new_season, new_ep):
         try:
             cell = sheet.find(title)
             if cell:
-                # Update Status (Col 4), Season (Col 10), Ep (Col 11)
+                # Update Status(4), Season(10), Ep(11)
                 sheet.update_cell(cell.row, 4, new_status)
                 sheet.update_cell(cell.row, 10, new_season)
                 sheet.update_cell(cell.row, 11, new_ep)
@@ -119,7 +107,7 @@ def delete_from_sheet(title):
                 time.sleep(0.5)
         except: pass
 
-# --- SEARCH & DISCOVERY ENGINE ---
+# --- SEARCH ENGINE ---
 def search_unified(query, selected_types, selected_genres, min_rating):
     results_data = []
     
@@ -331,17 +319,39 @@ elif tab == "My Gallery":
     if st.button("🔄 Refresh"): st.cache_data.clear()
     
     if sheet:
+        # --- BULLETPROOF DATA LOADER ---
         raw_data = sheet.get_all_values()
         
-        if len(raw_data) > 1:
-            headers = raw_data[0]
-            rows = raw_data[1:]
-            df = pd.DataFrame(rows, columns=headers)
+        # We Define FORCE Headers to guarantee columns exist
+        HEADERS = [
+            "Title", "Type", "Country", "Status", "Genres", "Image", 
+            "Overview", "Rating", "Backdrop", "Current_Season", 
+            "Current_Ep", "Total_Eps"
+        ]
+        
+        if len(raw_data) > 0:
+            # Check if row 1 is actually headers
+            if raw_data[0] and raw_data[0][0] == "Title":
+                data_rows = raw_data[1:]
+            else:
+                # If headers are missing/bad, assume data starts at row 0
+                data_rows = raw_data
+
+            # Sanitize rows to match header length
+            safe_rows = []
+            for row in data_rows:
+                # Pad with empty strings if short
+                if len(row) < len(HEADERS):
+                    row += [""] * (len(HEADERS) - len(row))
+                # Trim if long
+                safe_rows.append(row[:len(HEADERS)])
+            
+            df = pd.DataFrame(safe_rows, columns=HEADERS)
             
             with st.expander("Filter Collection", expanded=False):
                 f1, f2, f3, f4 = st.columns(4)
                 with f1: filter_text = st.text_input("Search Title")
-                with f2: filter_type = st.multiselect("Filter Type", df['Type'].unique() if 'Type' in df.columns else [])
+                with f2: filter_type = st.multiselect("Filter Type", df['Type'].unique())
                 with f3: filter_genre = st.multiselect("Filter Genre", GENRES)
                 with f4: filter_status = st.multiselect("Status", ["Plan to Watch", "Watching", "Completed", "Dropped"])
             
@@ -361,7 +371,7 @@ elif tab == "My Gallery":
                     cols = st.columns(cols_per_row)
                     for idx, (_, item) in enumerate(row.iterrows()):
                         with cols[idx]:
-                            # --- ROBUST IMAGE HANDLING ---
+                            # Image Safety
                             img_url = str(item.get('Image', '')).strip()
                             if not img_url.startswith("http"):
                                 img_url = "https://via.placeholder.com/200x300?text=No+Image"
@@ -376,10 +386,8 @@ elif tab == "My Gallery":
                                 new_s = st.selectbox("Status", opts, key=f"st_{item['Title']}_{idx}", index=opts.index(curr))
                                 
                                 if item['Type'] != "Movies":
-                                    # Convert to int safely
                                     try: c_sea = int(item.get('Current_Season', 1))
                                     except: c_sea = 1
-                                    
                                     try: c_ep = int(item.get('Current_Ep', 0))
                                     except: c_ep = 0
 
@@ -389,8 +397,7 @@ elif tab == "My Gallery":
                                     with col_sea:
                                         if not is_manga:
                                             new_sea = st.number_input("Season:", min_value=1, value=c_sea, step=1, key=f"sea_{item['Title']}_{idx}")
-                                        else:
-                                            new_sea = 1
+                                        else: new_sea = 1
                                     with col_ep:
                                         label = "Chapter" if is_manga else "Episode"
                                         new_ep = st.number_input(f"{label}:", min_value=0, value=c_ep, step=1, key=f"ep_{item['Title']}_{idx}")
