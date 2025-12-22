@@ -38,7 +38,7 @@ def get_tmdb_genres():
 
 tmdb_id_map, tmdb_name_map = get_tmdb_genres()
 
-# --- GOOGLE SHEETS CONNECTION ---
+# --- GOOGLE SHEETS CONNECTION & AUTO-REPAIR ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
@@ -52,6 +52,25 @@ def get_google_sheet():
     client = gspread.authorize(creds)
     try:
         sheet = client.open(GOOGLE_SHEET_NAME).sheet1
+        
+        # --- AUTO-REPAIR LOGIC ---
+        # 1. Check if sheet is empty
+        vals = sheet.get_all_values()
+        REQUIRED_HEADERS = [
+            "Title", "Type", "Country", "Status", "Genres", "Image", 
+            "Overview", "Rating", "Backdrop", "Current_Season", 
+            "Current_Ep", "Total_Eps"
+        ]
+        
+        # If completely empty or missing headers, write them
+        if not vals or vals[0] != REQUIRED_HEADERS:
+            # If it's empty, just append. If it has bad data, we might need to clear or insert.
+            # Safest is to insert at top if missing
+            if not vals:
+                sheet.append_row(REQUIRED_HEADERS)
+            elif vals[0][0] != "Title": 
+                sheet.insert_row(REQUIRED_HEADERS, 1)
+                
         return sheet
     except:
         return None
@@ -61,6 +80,7 @@ def add_to_sheet(item):
     sheet = get_google_sheet()
     if sheet:
         try:
+            # Columns: Title, Type, Country, Status, Genres, Image, Overview, Rating, Backdrop, Season, Ep, Total
             row_data = [
                 item['Title'], 
                 item['Type'], 
@@ -92,7 +112,7 @@ def update_status_in_sheet(title, new_status, new_season, new_ep):
                 sheet.update_cell(cell.row, 4, new_status)
                 sheet.update_cell(cell.row, 10, new_season)
                 sheet.update_cell(cell.row, 11, new_ep)
-                st.toast(f"✅ Updated: {title}")
+                st.toast(f"✅ Saved: {title}")
                 time.sleep(0.5)
         except: pass
 
@@ -319,31 +339,28 @@ elif tab == "My Gallery":
     if st.button("🔄 Refresh"): st.cache_data.clear()
     
     if sheet:
-        # --- BULLETPROOF DATA LOADER ---
+        # --- BULLETPROOF DATA LOADING ---
         raw_data = sheet.get_all_values()
         
-        # We Define FORCE Headers to guarantee columns exist
         HEADERS = [
             "Title", "Type", "Country", "Status", "Genres", "Image", 
             "Overview", "Rating", "Backdrop", "Current_Season", 
             "Current_Ep", "Total_Eps"
         ]
         
-        if len(raw_data) > 0:
-            # Check if row 1 is actually headers
-            if raw_data[0] and raw_data[0][0] == "Title":
-                data_rows = raw_data[1:]
-            else:
-                # If headers are missing/bad, assume data starts at row 0
-                data_rows = raw_data
-
-            # Sanitize rows to match header length
+        if len(raw_data) > 1:
+            # Assume row 0 is headers, data is row 1+
+            # We enforce strict columns to avoid crashes
             safe_rows = []
-            for row in data_rows:
-                # Pad with empty strings if short
+            for row in raw_data[1:]:
+                # CRITICAL FIX: Skip empty rows or rows without a Title
+                if not row or not row[0].strip():
+                    continue
+                    
+                # Pad row if short
                 if len(row) < len(HEADERS):
                     row += [""] * (len(HEADERS) - len(row))
-                # Trim if long
+                
                 safe_rows.append(row[:len(HEADERS)])
             
             df = pd.DataFrame(safe_rows, columns=HEADERS)
@@ -351,16 +368,17 @@ elif tab == "My Gallery":
             with st.expander("Filter Collection", expanded=False):
                 f1, f2, f3, f4 = st.columns(4)
                 with f1: filter_text = st.text_input("Search Title")
-                with f2: filter_type = st.multiselect("Filter Type", df['Type'].unique())
+                with f2: filter_type = st.multiselect("Filter Type", df['Type'].unique() if not df.empty else [])
                 with f3: filter_genre = st.multiselect("Filter Genre", GENRES)
                 with f4: filter_status = st.multiselect("Status", ["Plan to Watch", "Watching", "Completed", "Dropped"])
             
-            if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
-            if filter_type: df = df[df['Type'].isin(filter_type)]
-            if filter_status: df = df[df['Status'].isin(filter_status)]
-            if filter_genre:
-                mask = df['Genres'].apply(lambda x: any(g.lower() in str(x).lower() for g in filter_genre))
-                df = df[mask]
+            if not df.empty:
+                if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
+                if filter_type: df = df[df['Type'].isin(filter_type)]
+                if filter_status: df = df[df['Status'].isin(filter_status)]
+                if filter_genre:
+                    mask = df['Genres'].apply(lambda x: any(g.lower() in str(x).lower() for g in filter_genre))
+                    df = df[mask]
 
             st.divider()
             
