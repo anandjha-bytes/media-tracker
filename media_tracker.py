@@ -545,8 +545,9 @@ elif tab == "My Gallery":
                                     if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
                                         st.video(f"https://www.youtube.com/watch?v={details['trailer']['id']}")
                                     
+                                    # SMART SEARCH - ANIKAI
                                     anikai_url = f"https://www.google.com/search?q=site:anikai.to+{item['Title'].replace(' ', '+')}"
-                                    st.link_button("📺 Watch on Anikai.to", anikai_url)
+                                    st.link_button("📺 Search Anikai.to", anikai_url)
 
                                     st.write("**Official Sources:**")
                                     links = details.get('externalLinks', [])
@@ -561,17 +562,19 @@ elif tab == "My Gallery":
                                 
                                 # COMICS
                                 elif item['Type'] in ["Manga", "Manhwa", "Manhua"]:
-                                    st.link_button("📖 Read (Comix.to)", f"https://www.google.com/search?q=site:comix.to+{item['Title']}")
+                                    # SMART SEARCH - COMIX
+                                    comix_url = f"https://www.google.com/search?q=site:comix.to+{item['Title'].replace(' ', '+')}"
+                                    st.link_button("📖 Search Comix.to", comix_url)
                                 
                                 # LIVE ACTION
                                 elif item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]:
                                     trailer = get_tmdb_trailer(tmdb_id, m_type)
                                     if trailer: st.video(trailer)
                                     
-                                    # KissKH Smart Search (Asian Drama Only)
+                                    # SMART SEARCH - KISSKH
                                     if item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
                                         kisskh_url = f"https://www.google.com/search?q=site:kisskh.ws+{item['Title'].replace(' ', '+')}"
-                                        st.link_button("🎎 Watch on KissKH", kisskh_url)
+                                        st.link_button("🎎 Search KissKH", kisskh_url)
                                         st.link_button("💙 Search Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
 
                                     # 3. Official TMDB Providers
