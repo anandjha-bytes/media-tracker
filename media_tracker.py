@@ -117,7 +117,6 @@ def fetch_details_and_add(item):
     total_eps = item['Total_Eps']
     media_id = item.get('ID') 
     
-    # Fetch initial total counts for TV
     if item['Type'] in ["Web Series", "K-Drama", "C-Drama", "Thai Drama"] and media_id:
         try:
             tv_api = TV()
@@ -126,7 +125,6 @@ def fetch_details_and_add(item):
             total_eps = getattr(details, 'number_of_episodes', "?")
         except: pass
 
-    # DETERMINE DEFAULT STATUS
     default_status = "Plan to Watch"
     if item['Type'] in ["Manga", "Manhwa", "Manhua", "Book", "Novel"]:
         default_status = "Plan to Read"
@@ -265,34 +263,24 @@ def fetch_anilist_data(title, media_type, format_in=None, country_in=None):
 @st.cache_data(ttl=3600)
 def fetch_google_books(query, genre=None):
     """
-    Robust Google Books Fetcher (Combines Text + Genre)
+    Robust Google Books Fetcher (Fixed for broad searching)
     """
-    # Base URL
     url = "https://www.googleapis.com/books/v1/volumes"
-    
-    # Construct the 'q' parameter carefully
-    q_parts = []
+    params = {'maxResults': 20, 'printType': 'books'}
     
     if query and query.strip():
-        # Clean user input
-        q_parts.append(query.strip())
-    
-    if genre:
-        # Add genre constraint
-        q_parts.append(f"subject:{genre}")
-        
-    # Default fallback
-    if not q_parts:
-        q_parts.append("subject:fiction")
-        
-    # Join parts with a space (acts as implicit AND)
-    final_q = " ".join(q_parts)
-    
-    params = {
-        'q': final_q,
-        'maxResults': 20,
-        'printType': 'books'
-    }
+        # User typed something: Prioritize the query text
+        # If a genre is ALSO selected, add it loosely to help context
+        q_val = query.strip()
+        if genre:
+            q_val += f" subject:{genre}"
+        params['q'] = q_val
+    elif genre:
+        # User only selected a genre, no text
+        params['q'] = f"subject:{genre}"
+    else:
+        # Fallback (e.g. user just clicked search with empty inputs)
+        params['q'] = "subject:fiction"
 
     try:
         r = requests.get(url, params=params)
@@ -392,39 +380,27 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         discover = Discover()
         search = Search()
         
-        # Helper to run TMDB
         def run_tmdb(media_kind, specific_type, lang_filter=None):
             try:
-                # IMPORTANT: If query exists, use Search (lenient). If not, use Discover (strict).
+                # If query exists, use Search (lenient). If not, use Discover (strict).
                 if query:
                     if media_kind == "Movie": results = search.movies(query, page=page)
                     else: results = search.tv_shows(query, page=page)
                 else:
                     kwargs = {'sort_by': tmdb_sort, 'page': page, 'vote_count.gte': 5}
-                    if g_str: kwargs['with_genres'] = g_str
+                    if g_ids: kwargs['with_genres'] = g_ids
                     if lang_filter: kwargs['with_original_language'] = lang_filter
                     
                     if media_kind == "Movie": results = discover.discover_movies(kwargs)
                     else: results = discover.discover_tv_shows(kwargs)
 
-                # Post-Processing Filter (Crucial for correct "Search" results)
                 for r in results:
                     res_lang = getattr(r, 'original_language', 'en')
-                    
-                    # If user searched "All of Us Are Dead" (Korean), standard search returns it.
-                    # We must ensure it matches the requested "K-Drama" tab.
                     match = True
                     if specific_type == "K-Drama" and res_lang != 'ko': match = False
                     elif specific_type == "C-Drama" and res_lang != 'zh': match = False
                     elif specific_type == "Thai Drama" and res_lang != 'th': match = False
                     
-                    # If Web Series, accept anything NOT asian drama (or accept all, user preference)
-                    if specific_type == "Web Series" and res_lang in ['ko', 'zh', 'th', 'ja']:
-                        # Optional: Exclude Asian dramas from "Web Series" to keep tabs clean?
-                        # Let's keep it inclusive for now, or strict 'en'. 
-                        # Ideally, Web Series = Western TV.
-                        pass 
-
                     if match:
                         process_tmdb_result(r, media_kind, results_data, selected_types, selected_genres)
             except: pass
@@ -454,25 +430,24 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN")
             process_anilist_results(r, results_data, "Manhua", selected_genres)
 
-        # JP Light Novels / Asian Web Novels
         if "Novel" in selected_types:
              r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
              process_anilist_results(r, results_data, "Novel", selected_genres)
 
-    # 3. GOOGLE BOOKS (Western Novels & Books)
+    # 3. GOOGLE BOOKS
     if "Book" in selected_types or "Novel" in selected_types:
         target_genre = None
         if selected_genres:
             book_genres = [g for g in selected_genres if g in BOOK_GENRES]
             if book_genres: target_genre = book_genres[0]
 
-        # Novel Handling
         if "Novel" in selected_types:
-             # Search Google Books too (bridges gap for non-JP novels)
-             items = fetch_google_books(query, genre=target_genre)
+             # Search Google Books with specific query modification
+             novel_query = query if query else "fiction"
+             if query: novel_query += " novel" # Bias towards novels
+             items = fetch_google_books(novel_query, genre=target_genre)
              process_google_books(items, results_data, "Novel")
              
-        # Book Handling
         if "Book" in selected_types:
              items = fetch_google_books(query, genre=target_genre)
              process_google_books(items, results_data, "Book")
@@ -514,7 +489,7 @@ def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, forma
 
 def process_tmdb_result(res, media_kind, results_list, selected_types, selected_genres):
     origin = getattr(res, 'original_language', 'en')
-    detected_type = "Web Series" # Default
+    detected_type = "Web Series" 
     
     if media_kind == "Movie": 
         detected_type = "Movies"
@@ -524,10 +499,8 @@ def process_tmdb_result(res, media_kind, results_list, selected_types, selected_
     elif origin == 'ja': detected_type = "Anime"
     elif origin == 'en': detected_type = "Web Series"
     
-    # Strict Filter: Only add if this detected type was actually requested
     if detected_type not in selected_types: return
     
-    # Genre Check
     genre_ids = getattr(res, 'genre_ids', [])
     res_genres = [ID_TO_GENRE.get(gid, "Unknown") for gid in genre_ids]
     if selected_genres:
@@ -566,7 +539,6 @@ if tab == "Search & Add":
             all_types = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel", "Book"]
             selected_types = st.multiselect("Type", all_types, default=["Movies"])
         
-        # DYNAMIC GENRES
         current_genres = list(TMDB_GENRE_MAP.keys())
         if "Book" in selected_types or "Novel" in selected_types:
              current_genres = sorted(list(set(current_genres + BOOK_GENRES)))
@@ -631,7 +603,6 @@ elif tab == "My Gallery":
             
             df = pd.DataFrame(safe_rows, columns=HEADERS)
             
-            # --- FILTER BAR ---
             with st.expander("Filter Collection", expanded=False):
                 c1, c2, c3 = st.columns(3)
                 with c1: filter_text = st.text_input("Search Title")
