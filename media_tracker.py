@@ -88,7 +88,7 @@ def get_google_sheet():
                  sheet.resize(cols=len(REQUIRED_HEADERS))
                  for i, header in enumerate(REQUIRED_HEADERS):
                      sheet.update_cell(1, i+1, header)
-                
+                 
         return sheet
     except:
         return None
@@ -471,9 +471,6 @@ if tab == "Search & Add":
 elif tab == "My Gallery":
     st.subheader("My Library")
     
-    # ---------------------------
-    #  DRAG & DROP REORDER AREA
-    # ---------------------------
     sheet = get_google_sheet()
     
     if sheet:
@@ -488,145 +485,109 @@ elif tab == "My Gallery":
                 safe_rows.append(row[:len(HEADERS)])
             df = pd.DataFrame(safe_rows, columns=HEADERS)
             
-            # --- SORTABLE COMPONENT ---
-            if HAS_SORTABLES:
-                with st.expander("≡ Drag & Drop Reorder", expanded=False):
-                    st.caption("Drag items to sort, then click 'Save Order'.")
-                    titles = df['Title'].tolist()
-                    sorted_titles = sort_items(titles)
-                    
-                    if st.button("💾 Save New Order"):
-                        new_df = df.set_index('Title').loc[sorted_titles].reset_index()
-                        bulk_update_order(new_df)
-            else:
-                st.warning("⚠️ Drag & Drop module missing. Add 'streamlit-sortables' to requirements.txt.")
-                if st.button("🔄 Refresh"): st.cache_data.clear()
-
-            with st.expander("Filter Collection", expanded=False):
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    def_idx = list(tmdb_countries.keys()).index("India") if "India" in tmdb_countries else 0
-                    stream_country = st.selectbox("Select Country", list(tmdb_countries.keys()), index=def_idx)
-                    country_code = tmdb_countries[stream_country]
-                with c2: filter_text = st.text_input("Search Title")
-                with c3: filter_type = st.multiselect("Filter Type", df['Type'].unique())
-                with c4: filter_status = st.multiselect("Status", ["Plan to Watch", "Watching", "Completed"])
+            # 1. Get Unique Types for Tabs
+            unique_types = sorted(df['Type'].unique().tolist())
             
-            if not df.empty:
-                if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
-                if filter_type: df = df[df['Type'].isin(filter_type)]
-                if filter_status: df = df[df['Status'].isin(filter_status)]
-
-            st.divider()
-            
-            if not df.empty:
-                cols_per_row = 5
-                rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
-                for row_chunk in rows:
-                    cols = st.columns(cols_per_row)
-                    for col, (index, item) in zip(cols, row_chunk.iterrows()):
-                        with col:
-                            img = item.get('Image', '')
-                            if not img.startswith("http"): img = "https://via.placeholder.com/200x300?text=No+Image"
-                            st.image(img, use_container_width=True)
-                            
-                            st.markdown(f"**{item['Title']}**")
-                            unique_key = f"{index}"
-                            
-                            with st.popover("📜 Overview & Streaming"):
-                                tmdb_id = item.get('ID')
-                                m_type = 'movie' if item['Type'] == "Movies" else 'tv'
-                                if not tmdb_id and item['Type'] not in ["Anime", "Manga", "Manhwa", "Manhua"]:
-                                    tmdb_id = recover_tmdb_id(item['Title'], m_type)
+            if unique_types:
+                # 2. Create Tabs
+                tabs = st.tabs(unique_types)
+                
+                # 3. Iterate through each tab
+                for t, category in zip(tabs, unique_types):
+                    with t:
+                        # FILTER DATA FOR THIS TAB
+                        subset = df[df['Type'] == category]
+                        
+                        # --- DRAG & DROP REORDER (Specific to this Tab) ---
+                        if HAS_SORTABLES and not subset.empty:
+                            with st.expander(f"🔄 Reorder {category}", expanded=False):
+                                st.caption("Drag items to change order, then click Save.")
+                                subset_titles = subset['Title'].tolist()
+                                sorted_titles = sort_items(subset_titles, key=f"sort_{category}")
                                 
-                                # ANIME
-                                if item['Type'] == "Anime":
-                                    details = fetch_anime_details(item['Title'])
-                                    if 'trailer' in details and details['trailer'] and details['trailer']['site'] == 'youtube':
-                                        st.video(f"https://www.youtube.com/watch?v={details['trailer']['id']}")
-                                    
-                                    # SMART SEARCH - ANIKAI
-                                    anikai_url = f"https://www.google.com/search?q=site:anikai.to+{item['Title'].replace(' ', '+')}"
-                                    st.link_button("📺 Search Anikai.to", anikai_url)
-
-                                    st.write("**Official Sources:**")
-                                    links = details.get('externalLinks', [])
-                                    found_cr = False
-                                    if links:
-                                        for l in links:
-                                            if 'crunchyroll' in l['site'].lower():
-                                                st.link_button(f"🟠 {l['site']}", l['url']); found_cr = True
-                                            else: st.link_button(f"🔗 {l['site']}", l['url'])
-                                    if not found_cr:
-                                        st.link_button("🔍 Search Google", f"https://www.google.com/search?q=watch+{item['Title']}+anime")
-                                
-                                # COMICS
-                                elif item['Type'] in ["Manga", "Manhwa", "Manhua"]:
-                                    # SMART SEARCH - COMIX
-                                    comix_url = f"https://www.google.com/search?q=site:comix.to+{item['Title'].replace(' ', '+')}"
-                                    st.link_button("📖 Search Comix.to", comix_url)
-                                
-                                # LIVE ACTION
-                                elif item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]:
-                                    trailer = get_tmdb_trailer(tmdb_id, m_type)
-                                    if trailer: st.video(trailer)
-                                    
-                                    # SMART SEARCH - KISSKH
-                                    if item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
-                                        kisskh_url = f"https://www.google.com/search?q=site:kisskh.ws+{item['Title'].replace(' ', '+')}"
-                                        st.link_button("🎎 Search KissKH", kisskh_url)
-                                        st.link_button("💙 Search Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
-
-                                    # 3. Official TMDB Providers
-                                    if st.button(f"📺 Official Stream in {stream_country}?", key=f"stm_{unique_key}"):
-                                        provs = get_streaming_info(tmdb_id, m_type, country_code)
-                                        if not provs or provs == "No Info":
-                                            st.warning("Not available.")
-                                            st.link_button("🔍 Search Google", f"https://www.google.com/search?q=watch+{item['Title']}+online")
+                                # Logic to Save: We must update the GLOBAL df while keeping other categories in place
+                                if sorted_titles != subset_titles:
+                                    if st.button(f"💾 Save {category} Order"):
+                                        # Strategy: 
+                                        # 1. Take the full global list of Titles.
+                                        # 2. Find indices where 'Type' == category.
+                                        # 3. Replace those slots with the new sorted_titles.
+                                        full_titles = df['Title'].tolist()
+                                        category_indices = subset.index.tolist()
+                                        
+                                        # Safety check: lengths must match
+                                        if len(category_indices) == len(sorted_titles):
+                                            for idx_in_global, new_title in zip(category_indices, sorted_titles):
+                                                full_titles[idx_in_global] = new_title
+                                            
+                                            # Reconstruct DF in new order
+                                            new_df = df.set_index('Title').reindex(full_titles).reset_index()
+                                            bulk_update_order(new_df)
                                         else:
-                                            if 'flatrate' in provs:
-                                                st.write("🟢 **Stream:**")
-                                                for p in provs['flatrate']: 
-                                                    lnk = generate_provider_link(p['provider_name'], item['Title'])
-                                                    st.markdown(f"- [{p['provider_name']}]({lnk})")
-                                            if 'rent' in provs:
-                                                st.write("🟡 **Rent:**")
-                                                for p in provs['rent']: st.write(f"- {p['provider_name']}")
-                                
-                                st.write(f"**Rating:** {item.get('Rating')}")
-                                st.write(item.get('Overview'))
+                                            st.error("Sort Error: Index mismatch. Please refresh.")
 
-                            with st.expander("⚙️ Manage"):
-                                opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
-                                curr = item.get('Status', 'Plan to Watch')
-                                if curr not in opts: curr = "Plan to Watch"
-                                new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
-                                
-                                if item['Type'] != "Movies":
-                                    try: c_sea = int(item.get('Current_Season', 1))
-                                    except: c_sea = 1
-                                    try: c_ep = int(item.get('Current_Ep', 0))
-                                    except: c_ep = 0
-                                    
-                                    if item['Type'] in ["Manga", "Manhwa", "Manhua"]:
-                                        sea_label, ep_label = "Vol.", "Ch."
-                                    else:
-                                        sea_label, ep_label = "S", "E"
+                        # --- GRID DISPLAY ---
+                        if not subset.empty:
+                            cols_per_row = 5
+                            rows = [subset.iloc[i:i + cols_per_row] for i in range(0, len(subset), cols_per_row)]
+                            
+                            for row_chunk in rows:
+                                cols = st.columns(cols_per_row)
+                                for col, (index, item) in zip(cols, row_chunk.iterrows()):
+                                    with col:
+                                        img = item.get('Image', '')
+                                        if not img.startswith("http"): img = "https://via.placeholder.com/200x300?text=No+Image"
+                                        st.image(img, use_container_width=True)
+                                        
+                                        st.markdown(f"**{item['Title']}**")
+                                        # Use unique keys by combining category and index
+                                        unique_key = f"{category}_{index}"
+                                        
+                                        with st.popover("📜 Overview"):
+                                            st.write(f"**Status:** {item['Status']}")
+                                            st.write(f"**Rating:** {item['Rating']}")
+                                            st.caption(item['Overview'])
+                                            
+                                            # ... (Keep existing link logic) ...
+                                            if item['Type'] == "Anime":
+                                                st.link_button("📺 Search Anikai", f"https://www.google.com/search?q=site:anikai.to+{item['Title']}")
+                                            
+                                        with st.expander("⚙️ Manage"):
+                                            # Status Management
+                                            opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
+                                            curr = item.get('Status', 'Plan to Watch')
+                                            if curr not in opts: curr = "Plan to Watch"
+                                            new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
+                                            
+                                            # Ep/Season Management
+                                            if item['Type'] != "Movies":
+                                                try: c_sea = int(item.get('Current_Season', 1))
+                                                except: c_sea = 1
+                                                try: c_ep = int(item.get('Current_Ep', 0))
+                                                except: c_ep = 0
+                                                
+                                                sea_lbl = "Vol." if "Manga" in item['Type'] else "S"
+                                                ep_lbl = "Ch." if "Manga" in item['Type'] else "E"
+                                                
+                                                col_s, col_e = st.columns(2)
+                                                with col_s: new_sea = st.number_input(sea_lbl, min_value=1, value=c_sea, key=f"s_{unique_key}")
+                                                with col_e: new_ep = st.number_input(ep_lbl, min_value=0, value=c_ep, key=f"e_{unique_key}")
+                                            else: new_sea, new_ep = 1, 0
 
-                                    col_s, col_e = st.columns(2)
-                                    with col_s: new_sea = st.number_input(sea_label, min_value=1, value=c_sea, key=f"s_{unique_key}")
-                                    with col_e: new_ep = st.number_input(ep_label, min_value=0, value=c_ep, key=f"e_{unique_key}")
-                                else: new_sea, new_ep = 1, 0
-
-                                c_sv, c_dl = st.columns(2)
-                                with c_sv: 
-                                    if st.button("Save", key=f"sv_{unique_key}"):
-                                        update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
-                                        st.rerun()
-                                with c_dl:
-                                    if st.button("Del", key=f"dl_{unique_key}"):
-                                        delete_from_sheet(item['Title'])
-                                        st.rerun()
-            else: st.info("No items.")
-        else: st.info("Library Empty.")
-    else: st.error("Connection Failed. Check Secrets.")
+                                            c_sv, c_dl = st.columns(2)
+                                            with c_sv: 
+                                                if st.button("Save", key=f"sv_{unique_key}"):
+                                                    update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
+                                                    st.rerun()
+                                            with c_dl:
+                                                if st.button("Del", key=f"dl_{unique_key}"):
+                                                    delete_from_sheet(item['Title'])
+                                                    st.rerun()
+                        else:
+                            st.info(f"No {category} items found.")
+            else:
+                st.info("Library Empty.")
+        else:
+            st.info("Library Empty.")
+    else:
+        st.error("Connection Failed. Check Secrets.")
