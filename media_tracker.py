@@ -260,31 +260,24 @@ def fetch_anilist_data(title, media_type, format_in=None, country_in=None):
     return {}
 
 @st.cache_data(ttl=3600)
-def fetch_google_books(query, genre=None):
+def fetch_open_library(query, genre=None):
     """
-    Robust Google Books Fetcher (Fixed headers & fallback)
+    Fetches books from Open Library (No API Key Required)
     """
-    url = "https://www.googleapis.com/books/v1/volumes"
-    # IMPORTANT: User-Agent header prevents Google from blocking the script
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
-    q_val = ""
-    if query:
-        q_val = query
-        if genre: q_val += f" subject:{genre}"
+    url = "https://openlibrary.org/search.json"
+    q_str = query if query else ""
+    if genre and not query:
+        q_str = f"subject:{genre}"
     elif genre:
-        q_val = f"subject:{genre}"
-    else:
-        q_val = "subject:fiction"
+        q_str += f" {genre}"
+        
+    if not q_str: q_str = "fiction" # Fallback
 
-    params = {'q': q_val, 'maxResults': 20, 'printType': 'books'}
-
+    params = {'q': q_str, 'limit': 15}
     try:
-        r = requests.get(url, params=params, headers=headers)
+        r = requests.get(url, params=params)
         if r.status_code == 200:
-            return r.json().get('items', [])
+            return r.json().get('docs', [])
     except: pass
     return []
 
@@ -306,28 +299,33 @@ def get_tmdb_trailer(tmdb_id, media_type):
     return None
 
 # --- PROCESSORS ---
-def process_google_books(items, results_list, detected_type):
+def process_open_library(items, results_list, detected_type):
     for item in items:
-        info = item.get('volumeInfo', {})
-        img = info.get('imageLinks', {}).get('thumbnail', '')
-        if img.startswith('http://'): img = img.replace('http://', 'https://')
+        # Cover Image Logic
+        cover_id = item.get('cover_i')
+        img_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else "https://via.placeholder.com/300x450?text=No+Cover"
         
-        authors = ", ".join(info.get('authors', []))
-        title_display = info.get('title', 'Unknown')
-        if authors: title_display += f" - {authors}"
-
+        # Details
+        title = item.get('title', 'Unknown')
+        author_list = item.get('author_name', [])
+        authors = ", ".join(author_list[:2]) # First 2 authors
+        if authors: title += f" - {authors}"
+        
+        # Description is often missing in search results, stick to basic info
+        desc = f"First published in {item.get('first_publish_year', 'Unknown')}. "
+        
         results_list.append({
-            "Title": title_display,
+            "Title": title,
             "Type": detected_type,
-            "Country": "International", 
-            "Genres": ", ".join(info.get('categories', [])),
-            "Image": img,
-            "Overview": info.get('description', 'No description.'),
-            "Rating": f"{info.get('averageRating', 0)}/5",
+            "Country": "International",
+            "Genres": ", ".join(item.get('subject', [])[:3]), # Top 3 genres
+            "Image": img_url,
+            "Overview": desc,
+            "Rating": f"{round(item.get('ratings_average', 0), 1)}/5",
             "Backdrop": "",
-            "Total_Eps": str(info.get('pageCount', '?')), 
-            "ID": item.get('id'),
-            "Source": "GoogleBooks"
+            "Total_Eps": str(item.get('number_of_pages_median', '?')),
+            "ID": item.get('key'),
+            "Source": "OpenLibrary"
         })
 
 def process_anilist_results(res_list, results_list, forced_type, selected_genres):
@@ -364,7 +362,7 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # 1. VISUAL MEDIA
+    # 1. VISUAL MEDIA (Movies, Shows, Asian Dramas)
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         g_ids = ""
@@ -381,29 +379,39 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         
         def run_tmdb(media_kind, specific_type, lang_filter=None):
             try:
-                # Use Search if text provided, otherwise Discover
-                if query:
-                    if media_kind == "Movie": results = search.movies(query, page=page)
-                    else: results = search.tv_shows(query, page=page)
+                # SMART QUERY MODIFICATION
+                # If searching for Asian Drama, append country name to query
+                # This fixes "Search" finding US shows instead of Asian ones
+                active_query = query
+                if query and specific_type == "K-Drama": active_query = f"{query} Korean"
+                if query and specific_type == "C-Drama": active_query = f"{query} Chinese"
+                if query and specific_type == "Thai Drama": active_query = f"{query} Thai"
+
+                if active_query:
+                    if media_kind == "Movie": results = search.movies(active_query, page=page)
+                    else: results = search.tv_shows(active_query, page=page)
                 else:
+                    # Discovery Mode
                     kwargs = {'sort_by': tmdb_sort, 'page': page, 'vote_count.gte': 5}
                     if g_ids: kwargs['with_genres'] = g_ids
                     if lang_filter: kwargs['with_original_language'] = lang_filter
+                    
                     if media_kind == "Movie": results = discover.discover_movies(kwargs)
                     else: results = discover.discover_tv_shows(kwargs)
 
                 for r in results:
                     res_lang = getattr(r, 'original_language', 'en')
                     match = True
-                    # Relaxed matching for Search mode (Titles might be multi-lingual)
-                    if not query:
-                        if specific_type == "K-Drama" and res_lang != 'ko': match = False
-                        elif specific_type == "C-Drama" and res_lang != 'zh': match = False
-                        elif specific_type == "Thai Drama" and res_lang != 'th': match = False
-                    else:
-                        # In search mode, be permissive if user typed a specific title
-                        if specific_type == "K-Drama" and res_lang not in ['ko']: match = False 
-                        # (Still enforce basic lang check to avoid noise)
+                    
+                    # STRICT Filtering only in Discovery Mode or for specific Asian types
+                    if specific_type == "K-Drama" and res_lang != 'ko': match = False
+                    elif specific_type == "C-Drama" and res_lang != 'zh': match = False
+                    elif specific_type == "Thai Drama" and res_lang != 'th': match = False
+                    
+                    # If specific search, allow small leniency or fallback
+                    if query and not match:
+                        # If titles match exactly, maybe keep it? For now, stick to lang logic for purity.
+                        pass 
 
                     if match:
                         process_tmdb_result(r, media_kind, results_data, selected_types, selected_genres)
@@ -435,10 +443,11 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             process_anilist_results(r, results_data, "Manhua", selected_genres)
 
         if "Novel" in selected_types:
+             # Search AniList for Light Novels
              r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
              process_anilist_results(r, results_data, "Novel", selected_genres)
 
-    # 3. GOOGLE BOOKS
+    # 3. OPEN LIBRARY (Books / Western Novels)
     if "Book" in selected_types or "Novel" in selected_types:
         target_genre = None
         if selected_genres:
@@ -446,14 +455,14 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             if book_genres: target_genre = book_genres[0]
 
         if "Novel" in selected_types:
-             # Force 'novel' keyword if no genre, helps find books
-             q_mod = query + " novel" if query else ""
-             items = fetch_google_books(q_mod, genre=target_genre)
-             process_google_books(items, results_data, "Novel")
+             # Search Open Library with 'novel' focus
+             q_mod = query + " novel" if query else "fantasy novel"
+             items = fetch_open_library(q_mod, genre=target_genre)
+             process_open_library(items, results_data, "Novel")
              
         if "Book" in selected_types:
-             items = fetch_google_books(query, genre=target_genre)
-             process_google_books(items, results_data, "Book")
+             items = fetch_open_library(query, genre=target_genre)
+             process_open_library(items, results_data, "Book")
 
     return results_data
 
