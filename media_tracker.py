@@ -100,28 +100,24 @@ def get_google_sheet():
     except:
         return None
 
-# --- NEW: CACHED LIBRARY TITLES ---
-# This makes the "Already Added" check fast
-def get_library_titles():
-    if 'library_titles' not in st.session_state:
-        sheet = get_google_sheet()
-        if sheet:
-            try:
-                # Column 1 is Title
-                titles = sheet.col_values(1)
-                # Remove header and normalize
-                st.session_state.library_titles = [t.strip() for t in titles[1:] if t]
-            except:
-                st.session_state.library_titles = []
-        else:
-            st.session_state.library_titles = []
-    return st.session_state.library_titles
-
-# Force refresh of library titles (call after adding/deleting)
-def refresh_library_titles():
-    if 'library_titles' in st.session_state:
-        del st.session_state.library_titles
-    get_library_titles()
+# --- LIBRARY CACHE (For "Added" Status) ---
+def get_library_map():
+    """Returns a dict of Title -> {Status, Season, Ep} to check if items exist."""
+    sheet = get_google_sheet()
+    lib_map = {}
+    if sheet:
+        try:
+            records = sheet.get_all_records()
+            for row in records:
+                t = row.get('Title', '').strip()
+                if t:
+                    lib_map[t] = {
+                        'Status': row.get('Status'),
+                        'Current_Season': row.get('Current_Season'),
+                        'Current_Ep': row.get('Current_Ep')
+                    }
+        except: pass
+    return lib_map
 
 # --- DATABASE ACTIONS ---
 def fetch_details_and_add(item):
@@ -133,7 +129,7 @@ def fetch_details_and_add(item):
         existing_titles = sheet.col_values(1)
         if item['Title'] in existing_titles:
             st.toast(f"⚠️ '{item['Title']}' is already in your library!")
-            return False
+            return True # Return true so UI updates to "Added"
     except: pass
 
     total_seasons = 1
@@ -161,7 +157,6 @@ def fetch_details_and_add(item):
         ]
         sheet.append_row(row_data)
         st.toast(f"✅ Added: {item['Title']}")
-        refresh_library_titles() # Refresh cache
         return True
     except Exception as e:
         st.error(f"Error: {e}")
@@ -188,7 +183,6 @@ def delete_from_sheet(title):
             if cell:
                 sheet.delete_rows(cell.row)
                 st.toast(f"🗑️ Deleted: {title}")
-                refresh_library_titles() # Refresh cache
                 time.sleep(0.5)
         except: pass
 
@@ -251,6 +245,7 @@ def get_season_details(tmdb_id, season_num):
 
 @st.cache_data(ttl=3600)
 def fetch_anilist_data_single(title, media_type, format_in=None):
+    """Fetches a SINGLE item + Links for details."""
     query = '''
     query ($s: String, $t: MediaType, $f: MediaFormat) {
         Page(perPage: 1) {
@@ -277,6 +272,7 @@ def fetch_anilist_data_single(title, media_type, format_in=None):
 
 @st.cache_data(ttl=3600)
 def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, format=None):
+    """Fetches LIST for search grid."""
     anilist_sort = "POPULARITY_DESC"
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
@@ -310,24 +306,29 @@ def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, forma
     return []
 
 @st.cache_data(ttl=3600)
-def fetch_open_library(query, genre=None):
-    url = "https://openlibrary.org/search.json"
+def fetch_google_books(query, genre=None):
+    """Google Books Fetcher with User-Agent"""
+    url = "https://www.googleapis.com/books/v1/volumes"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     
-    params = {'limit': 15}
+    q_val = ""
     if query:
-        params['q'] = query
-        if genre and genre != "Web Novel":
-             params['q'] += f" subject:{genre}"
+        q_val = query
+        if genre and genre != "Web Novel": 
+             q_val += f" subject:{genre}"
     elif genre:
-        params['subject'] = genre
+        q_val = f"subject:{genre}"
     else:
-        params['subject'] = "fiction" 
+        q_val = "subject:fiction"
+
+    params = {'q': q_val, 'maxResults': 20, 'printType': 'books'}
 
     try:
-        headers = {'User-Agent': 'MediaTrackerApp/1.0'}
         r = requests.get(url, params=params, headers=headers)
         if r.status_code == 200:
-            return r.json().get('docs', [])
+            return r.json().get('items', [])
     except: pass
     return []
 
@@ -349,35 +350,32 @@ def get_tmdb_trailer(tmdb_id, media_type):
     return None
 
 # --- PROCESSORS ---
-def process_open_library(items, results_list, detected_type):
+def process_google_books(items, results_list, detected_type):
     for item in items:
-        cover_id = item.get('cover_i')
-        img_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else "https://via.placeholder.com/300x450?text=No+Cover"
-        
-        title = item.get('title', 'Unknown')
-        author_list = item.get('author_name', [])
-        authors = ", ".join(author_list[:2])
-        if authors: title += f" - {authors}"
-        
-        desc = f"First published in {item.get('first_publish_year', 'Unknown')}."
-        if item.get('first_sentence'):
-             desc = f"\"{item['first_sentence'][0]}\" - " + desc
-        
-        rating_val = item.get('ratings_average', 0)
+        info = item.get('volumeInfo', {})
+        img = info.get('imageLinks', {}).get('thumbnail', '')
+        if img.startswith('http://'): img = img.replace('http://', 'https://')
+        if not img: img = "https://via.placeholder.com/300x450?text=No+Cover"
+
+        authors = ", ".join(info.get('authors', []))
+        title_display = info.get('title', 'Unknown')
+        if authors: title_display += f" - {authors}"
+
+        desc = info.get('description', 'No description.')
         
         results_list.append({
-            "Title": title,
+            "Title": title_display,
             "Type": detected_type,
-            "Country": "International",
-            "Genres": ", ".join(item.get('subject', [])[:3]),
-            "Image": img_url,
+            "Country": "International", 
+            "Genres": ", ".join(info.get('categories', [])),
+            "Image": img,
             "Overview": desc,
-            "Rating": f"{round(rating_val, 1)}/5",
+            "Rating": f"{info.get('averageRating', 0)}/5",
             "Backdrop": "",
-            "Total_Eps": str(item.get('number_of_pages_median', '?')),
-            "ID": item.get('key'),
-            "Source": "OpenLibrary",
-            "Links": [] # OpenLibrary doesn't provide ext links usually
+            "Total_Eps": str(info.get('pageCount', '?')), 
+            "ID": item.get('id'),
+            "Source": "GoogleBooks",
+            "Links": []
         })
 
 def process_anilist_results(res_list, results_list, forced_type, selected_genres):
@@ -496,14 +494,13 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         if "Novel" in selected_types:
              r1 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
              process_anilist_results(r1, results_data, "Novel", selected_genres)
-             
              if "Web Novel" in selected_genres:
                  r2 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="KR", format="NOVEL")
                  process_anilist_results(r2, results_data, "Novel", selected_genres)
                  r3 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN", format="NOVEL")
                  process_anilist_results(r3, results_data, "Novel", selected_genres)
 
-    # 3. OPEN LIBRARY
+    # 3. GOOGLE BOOKS
     if "Book" in selected_types or "Novel" in selected_types:
         target_genre = None
         if selected_genres:
@@ -512,12 +509,12 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
 
         if "Novel" in selected_types:
              q_mod = query + " novel" if query else "fantasy novel"
-             items = fetch_open_library(q_mod, genre=target_genre)
-             process_open_library(items, results_data, "Novel")
+             items = fetch_google_books(q_mod, genre=target_genre)
+             process_google_books(items, results_data, "Novel")
              
         if "Book" in selected_types:
-             items = fetch_open_library(query, genre=target_genre)
-             process_open_library(items, results_data, "Book")
+             items = fetch_google_books(query, genre=target_genre)
+             process_google_books(items, results_data, "Book")
 
     return results_data
 
@@ -567,7 +564,7 @@ tab = st.sidebar.radio("Menu", ["My Gallery", "Search & Add"], key="main_nav")
 if tab == "Search & Add":
     st.subheader("Global Database Search")
     
-    # 1. SEARCH FORM (Allows "Enter" key)
+    # 1. SEARCH FORM (Press Enter to Submit)
     with st.form(key="search_form"):
         c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
         with c1: search_query = st.text_input("Title (Optional)")
@@ -593,10 +590,9 @@ if tab == "Search & Add":
             st.session_state.search_results = results
         if not st.session_state.search_results: st.warning("No results found.")
 
-    # 2. SEARCH RESULTS
     if st.session_state.search_results:
-        # Get existing items to check "Added" state
-        existing_library = get_library_titles()
+        # Load Library Cache for "Added" Check
+        lib_map = get_library_map()
         
         for idx, item in enumerate(st.session_state.search_results):
             with st.container():
@@ -608,34 +604,57 @@ if tab == "Search & Add":
                     st.caption(f"**{item['Type']}** | ⭐ {item['Rating']} | {item['Country']}")
                     st.caption(f"🏷️ {item['Genres']}")
                     
-                    # Overview Popover with Links
                     with st.popover("📜 Read Overview"):
                         st.write(item['Overview'])
-                        # If Comic, show Official Links here in search too
+                        # Show Official Links for Comics/Novels in Search
                         if item['Type'] in ["Manga", "Manhwa", "Manhua", "Novel"] and item.get('Links'):
                             st.write("**Official Sources:**")
                             for link in item['Links']:
                                 st.link_button(f"🔗 {link['site']}", link['url'])
 
-                    # ADD BUTTON LOGIC
-                    # Clean comparison to avoid whitespace mismatch
-                    is_added = False
-                    clean_title = item['Title'].strip().lower()
-                    for t in existing_library:
-                        if t.strip().lower() == clean_title:
-                            is_added = True
-                            break
+                    # "ADDED" LOGIC + MANAGEMENT
+                    is_added = item['Title'] in lib_map
                     
                     if is_added:
-                        st.button(f"✅ Added", disabled=True, key=f"added_{idx}")
+                        # If added, show Manage Controls instead of Add button
+                        existing_data = lib_map[item['Title']]
+                        st.success("✅ In Collection")
+                        
+                        with st.expander("Update Status", expanded=False):
+                            is_read = item['Type'] in ["Book", "Novel", "Manga", "Manhwa", "Manhua"]
+                            opts = ["Plan to Read", "Reading", "Completed", "Dropped"] if is_read else ["Plan to Watch", "Watching", "Completed", "Dropped"]
+                            
+                            # Get existing values safely
+                            curr_status = existing_data.get('Status', opts[0])
+                            if curr_status not in opts: curr_status = opts[0]
+                            
+                            try: curr_sea = int(existing_data.get('Current_Season', 1))
+                            except: curr_sea = 1
+                            try: curr_ep = int(existing_data.get('Current_Ep', 0))
+                            except: curr_ep = 0
+
+                            new_s = st.selectbox("Status", opts, index=opts.index(curr_status), key=f"s_search_{idx}")
+                            
+                            # Unit Logic
+                            if item['Type'] != "Movies":
+                                c_s, c_e = st.columns(2)
+                                lbl1 = "Vol." if is_read else "S"
+                                lbl2 = "Ch." if is_read else "E"
+                                ns = c_s.number_input(lbl1, value=curr_sea, min_value=1, key=f"ns_search_{idx}")
+                                ne = c_e.number_input(lbl2, value=curr_ep, min_value=0, key=f"ne_search_{idx}")
+                            else:
+                                ns, ne = 1, 0
+                            
+                            if st.button("Save Changes", key=f"save_search_{idx}"):
+                                update_status_in_sheet(item['Title'], new_s, ns, ne)
+                                st.rerun()
+
                     else:
                         if st.button(f"➕ Add Library", key=f"add_{idx}"):
                             with st.spinner("Adding..."):
                                 success = fetch_details_and_add(item)
-                                if success: 
-                                    st.rerun() # Rerun to update "Added" state immediately
+                                if success: st.rerun()
             st.divider()
-            
         if st.button("⬇️ Load More Results"):
             st.session_state.search_page += 1
             with st.spinner(f"Loading Page {st.session_state.search_page}..."):
@@ -769,9 +788,8 @@ elif tab == "My Gallery":
                                             elif is_comic:
                                                 st.caption("📖 Reading Options")
                                                 st.link_button("📖 Read on Comix.to", f"https://www.google.com/search?q=site:comix.to+{item['Title']}")
-                                                # New: Official Sources Logic for Gallery
-                                                # Since AniList links aren't stored in sheet row by default, we fetch live or check existing?
-                                                # Simplest: Live fetch just links
+                                                
+                                                # OFFICIAL SOURCES (AniList Fetch)
                                                 live_data = fetch_anilist_data_single(item['Title'], "MANGA")
                                                 if live_data and live_data.get('externalLinks'):
                                                     st.write("**Official Sources:**")
