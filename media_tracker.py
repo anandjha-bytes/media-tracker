@@ -100,9 +100,8 @@ def get_google_sheet():
     except:
         return None
 
-# --- LIBRARY CACHE (For "Added" Status) ---
+# --- LIBRARY CACHE (For "Added" Check) ---
 def get_library_map():
-    """Returns a dict of Title -> {Status, Season, Ep} to check if items exist."""
     sheet = get_google_sheet()
     lib_map = {}
     if sheet:
@@ -124,12 +123,11 @@ def fetch_details_and_add(item):
     sheet = get_google_sheet()
     if not sheet: return False
     
-    # 🔒 DUPLICATE CHECK
     try:
         existing_titles = sheet.col_values(1)
         if item['Title'] in existing_titles:
             st.toast(f"⚠️ '{item['Title']}' is already in your library!")
-            return True # Return true so UI updates to "Added"
+            return True
     except: pass
 
     total_seasons = 1
@@ -245,7 +243,6 @@ def get_season_details(tmdb_id, season_num):
 
 @st.cache_data(ttl=3600)
 def fetch_anilist_data_single(title, media_type, format_in=None):
-    """Fetches a SINGLE item + Links for details."""
     query = '''
     query ($s: String, $t: MediaType, $f: MediaFormat) {
         Page(perPage: 1) {
@@ -272,7 +269,6 @@ def fetch_anilist_data_single(title, media_type, format_in=None):
 
 @st.cache_data(ttl=3600)
 def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, format=None):
-    """Fetches LIST for search grid."""
     anilist_sort = "POPULARITY_DESC"
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
@@ -306,29 +302,24 @@ def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, forma
     return []
 
 @st.cache_data(ttl=3600)
-def fetch_google_books(query, genre=None):
-    """Google Books Fetcher with User-Agent"""
-    url = "https://www.googleapis.com/books/v1/volumes"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+def fetch_open_library(query, genre=None):
+    url = "https://openlibrary.org/search.json"
     
-    q_val = ""
+    params = {'limit': 15}
     if query:
-        q_val = query
-        if genre and genre != "Web Novel": 
-             q_val += f" subject:{genre}"
+        params['q'] = query
+        if genre and genre != "Web Novel":
+             params['q'] += f" subject:{genre}"
     elif genre:
-        q_val = f"subject:{genre}"
+        params['subject'] = genre
     else:
-        q_val = "subject:fiction"
-
-    params = {'q': q_val, 'maxResults': 20, 'printType': 'books'}
+        params['subject'] = "fiction" 
 
     try:
+        headers = {'User-Agent': 'MediaTrackerApp/1.0'}
         r = requests.get(url, params=params, headers=headers)
         if r.status_code == 200:
-            return r.json().get('items', [])
+            return r.json().get('docs', [])
     except: pass
     return []
 
@@ -350,31 +341,34 @@ def get_tmdb_trailer(tmdb_id, media_type):
     return None
 
 # --- PROCESSORS ---
-def process_google_books(items, results_list, detected_type):
+def process_open_library(items, results_list, detected_type):
     for item in items:
-        info = item.get('volumeInfo', {})
-        img = info.get('imageLinks', {}).get('thumbnail', '')
-        if img.startswith('http://'): img = img.replace('http://', 'https://')
-        if not img: img = "https://via.placeholder.com/300x450?text=No+Cover"
-
-        authors = ", ".join(info.get('authors', []))
-        title_display = info.get('title', 'Unknown')
-        if authors: title_display += f" - {authors}"
-
-        desc = info.get('description', 'No description.')
+        cover_id = item.get('cover_i')
+        img_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else "https://via.placeholder.com/300x450?text=No+Cover"
+        
+        title = item.get('title', 'Unknown')
+        author_list = item.get('author_name', [])
+        authors = ", ".join(author_list[:2])
+        if authors: title += f" - {authors}"
+        
+        desc = f"First published in {item.get('first_publish_year', 'Unknown')}."
+        if item.get('first_sentence'):
+             desc = f"\"{item['first_sentence'][0]}\" - " + desc
+        
+        rating_val = item.get('ratings_average', 0)
         
         results_list.append({
-            "Title": title_display,
+            "Title": title,
             "Type": detected_type,
-            "Country": "International", 
-            "Genres": ", ".join(info.get('categories', [])),
-            "Image": img,
+            "Country": "International",
+            "Genres": ", ".join(item.get('subject', [])[:3]),
+            "Image": img_url,
             "Overview": desc,
-            "Rating": f"{info.get('averageRating', 0)}/5",
+            "Rating": f"{round(rating_val, 1)}/5",
             "Backdrop": "",
-            "Total_Eps": str(info.get('pageCount', '?')), 
-            "ID": item.get('id'),
-            "Source": "GoogleBooks",
+            "Total_Eps": str(item.get('number_of_pages_median', '?')),
+            "ID": item.get('key'),
+            "Source": "OpenLibrary",
             "Links": []
         })
 
@@ -386,9 +380,7 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
         if forced_type == "Donghua" and origin != "CN": continue
         if forced_type == "Manhwa" and origin != "KR": continue
         if forced_type == "Manhua" and origin != "CN": continue
-        
-        if forced_type == "Novel":
-             pass 
+        if forced_type == "Novel": pass 
 
         res_genres = res.get('genres', [])
         if selected_genres:
@@ -500,7 +492,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                  r3 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN", format="NOVEL")
                  process_anilist_results(r3, results_data, "Novel", selected_genres)
 
-    # 3. GOOGLE BOOKS
+    # 3. OPEN LIBRARY
     if "Book" in selected_types or "Novel" in selected_types:
         target_genre = None
         if selected_genres:
@@ -509,12 +501,12 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
 
         if "Novel" in selected_types:
              q_mod = query + " novel" if query else "fantasy novel"
-             items = fetch_google_books(q_mod, genre=target_genre)
-             process_google_books(items, results_data, "Novel")
+             items = fetch_open_library(q_mod, genre=target_genre)
+             process_open_library(items, results_data, "Novel")
              
         if "Book" in selected_types:
-             items = fetch_google_books(query, genre=target_genre)
-             process_google_books(items, results_data, "Book")
+             items = fetch_open_library(query, genre=target_genre)
+             process_open_library(items, results_data, "Book")
 
     return results_data
 
@@ -564,7 +556,7 @@ tab = st.sidebar.radio("Menu", ["My Gallery", "Search & Add"], key="main_nav")
 if tab == "Search & Add":
     st.subheader("Global Database Search")
     
-    # 1. SEARCH FORM (Press Enter to Submit)
+    # 1. SEARCH FORM
     with st.form(key="search_form"):
         c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
         with c1: search_query = st.text_input("Title (Optional)")
@@ -591,7 +583,6 @@ if tab == "Search & Add":
         if not st.session_state.search_results: st.warning("No results found.")
 
     if st.session_state.search_results:
-        # Load Library Cache for "Added" Check
         lib_map = get_library_map()
         
         for idx, item in enumerate(st.session_state.search_results):
@@ -606,17 +597,15 @@ if tab == "Search & Add":
                     
                     with st.popover("📜 Read Overview"):
                         st.write(item['Overview'])
-                        # Show Official Links for Comics/Novels in Search
                         if item['Type'] in ["Manga", "Manhwa", "Manhua", "Novel"] and item.get('Links'):
                             st.write("**Official Sources:**")
                             for link in item['Links']:
                                 st.link_button(f"🔗 {link['site']}", link['url'])
 
-                    # "ADDED" LOGIC + MANAGEMENT
+                    # "ADDED" LOGIC & DIRECT MANAGE
                     is_added = item['Title'] in lib_map
                     
                     if is_added:
-                        # If added, show Manage Controls instead of Add button
                         existing_data = lib_map[item['Title']]
                         st.success("✅ In Collection")
                         
@@ -624,7 +613,6 @@ if tab == "Search & Add":
                             is_read = item['Type'] in ["Book", "Novel", "Manga", "Manhwa", "Manhua"]
                             opts = ["Plan to Read", "Reading", "Completed", "Dropped"] if is_read else ["Plan to Watch", "Watching", "Completed", "Dropped"]
                             
-                            # Get existing values safely
                             curr_status = existing_data.get('Status', opts[0])
                             if curr_status not in opts: curr_status = opts[0]
                             
@@ -635,7 +623,6 @@ if tab == "Search & Add":
 
                             new_s = st.selectbox("Status", opts, index=opts.index(curr_status), key=f"s_search_{idx}")
                             
-                            # Unit Logic
                             if item['Type'] != "Movies":
                                 c_s, c_e = st.columns(2)
                                 lbl1 = "Vol." if is_read else "S"
@@ -645,9 +632,15 @@ if tab == "Search & Add":
                             else:
                                 ns, ne = 1, 0
                             
-                            if st.button("Save Changes", key=f"save_search_{idx}"):
-                                update_status_in_sheet(item['Title'], new_s, ns, ne)
-                                st.rerun()
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                if st.button("Save", key=f"save_search_{idx}"):
+                                    update_status_in_sheet(item['Title'], new_s, ns, ne)
+                                    st.rerun()
+                            with c2:
+                                if st.button("Delete", key=f"del_search_{idx}"):
+                                    delete_from_sheet(item['Title'])
+                                    st.rerun()
 
                     else:
                         if st.button(f"➕ Add Library", key=f"add_{idx}"):
