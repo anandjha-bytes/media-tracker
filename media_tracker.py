@@ -566,25 +566,26 @@ elif tab == "My Gallery":
                                             
                                             st.divider()
                                             
-                                            # C. STREAMING LINKS (Smart Logic)
-                                            st.caption(f"📺 Watch in {stream_country}")
+                                            # C. SMART LINKS & STREAMING LOGIC
                                             
-                                            # 1. ANIME Logic
-                                            if item['Type'] == "Anime":
-                                                st.link_button("🟠 Search Crunchyroll", f"https://www.crunchyroll.com/search?q={item['Title']}")
-                                                st.link_button("📺 Search Anikai.to", f"https://www.google.com/search?q=site:anikai.to+{item['Title']}")
-                                            
-                                            # 2. MANGA/COMICS Logic
-                                            elif item['Type'] in ["Manga", "Manhwa", "Manhua"]:
+                                            # 1. READ ONLY (Manga, Manhwa, Manhua)
+                                            if item['Type'] in ["Manga", "Manhwa", "Manhua"]:
+                                                st.caption("📖 Reading Options")
                                                 st.link_button("📖 Read on Comix.to", f"https://www.google.com/search?q=site:comix.to+{item['Title']}")
                                             
-                                            # 3. ASIAN DRAMA Logic
-                                            elif item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
-                                                st.link_button("💙 Watch on Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
-                                                st.link_button("🎎 Watch on KissKH", f"https://www.google.com/search?q=site:kisskh.ws+{item['Title']}")
-                                            
-                                            # 4. GENERAL (Movies/Series) - Official TMDB Providers
-                                            if item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Anime"]:
+                                            # 2. WATCHABLE (Movies, Series, Anime, Dramas)
+                                            else:
+                                                st.caption(f"📺 Watch in {stream_country}")
+                                                
+                                                # ANIME Specific
+                                                if item['Type'] == "Anime":
+                                                    st.link_button("🟠 Search Crunchyroll", f"https://www.crunchyroll.com/search?q={item['Title']}")
+                                                
+                                                # ASIAN DRAMA Specific
+                                                elif item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
+                                                    st.link_button("💙 Watch on Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
+                                                
+                                                # OFFICIAL PROVIDERS (Movies, Series, Anime, Dramas)
                                                 provs = get_streaming_info(tmdb_id, m_type, country_code)
                                                 has_streams = False
                                                 
