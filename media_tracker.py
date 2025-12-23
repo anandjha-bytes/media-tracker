@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from tmdbv3api import TMDb, Movie, TV, Search, Genre, Discover
+from tmdbv3api import TMDb, Movie, TV, Search, Genre, Discover, Season
 import requests
 import time
 import urllib.parse
@@ -107,9 +107,10 @@ def fetch_details_and_add(item):
     except: pass
 
     total_seasons = 1
-    total_eps = item['Total_Eps']
+    total_eps = item['Total_Eps'] # Defaults to "?" or API value
     media_id = item.get('ID') 
     
+    # Fetch initial total counts if available
     if item['Type'] not in ["Movies", "Anime", "Manga", "Manhwa", "Manhua"] and media_id:
         try:
             tv_api = TV()
@@ -195,7 +196,6 @@ def get_streaming_info(tmdb_id, media_type, country_code):
         r = requests.get(url)
         data = r.json()
         if 'results' in data and country_code in data['results']:
-            # Returns the raw data which includes 'link', 'flatrate', 'rent', 'buy'
             return data['results'][country_code]
         else: return None
     except: return None
@@ -213,8 +213,35 @@ def get_provider_link(provider_name, title):
     if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
     if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
     if 'youtube' in p or 'google play' in p: return f"https://www.youtube.com/results?search_query={q}"
-    # Fallback to Google Search
     return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
+
+# --- DYNAMIC DATA FETCHERS ---
+@st.cache_data(ttl=3600)
+def get_season_details(tmdb_id, season_num):
+    """Fetches episode count for a specific season"""
+    if not tmdb_id: return None
+    try:
+        clean_id = int(float(tmdb_id))
+        url = f"https://api.themoviedb.org/3/tv/{clean_id}/season/{season_num}?api_key={TMDB_API_KEY}"
+        r = requests.get(url)
+        if r.status_code == 200:
+            data = r.json()
+            return {"episode_count": len(data.get('episodes', [])), "name": data.get('name')}
+    except: return None
+    return None
+
+@st.cache_data(ttl=3600)
+def get_show_overview(tmdb_id):
+    """Fetches total number of seasons"""
+    if not tmdb_id: return None
+    try:
+        clean_id = int(float(tmdb_id))
+        url = f"https://api.themoviedb.org/3/tv/{clean_id}?api_key={TMDB_API_KEY}"
+        r = requests.get(url)
+        if r.status_code == 200:
+            return r.json()
+    except: return None
+    return None
 
 def fetch_anime_details(title):
     query = '''
@@ -223,6 +250,7 @@ def fetch_anime_details(title):
             media(search: $s, type: ANIME) {
                 trailer { id site }
                 externalLinks { site url }
+                episodes
             }
         }
     }
@@ -647,15 +675,11 @@ elif tab == "My Gallery":
 
                                             # Smart Migration (Handle old DB values)
                                             curr = item.get('Status', opts[0])
-                                            
-                                            # If current status isn't in valid options, try to map it
                                             if curr not in opts:
                                                 if curr == "Plan to Watch" and is_comic: curr = "Plan to Read"
                                                 elif curr == "Watching" and is_comic: curr = "Reading"
                                                 elif curr == "Plan to Read" and not is_comic: curr = "Plan to Watch"
                                                 elif curr == "Reading" and not is_comic: curr = "Watching"
-                                                
-                                                # Fallback if still invalid
                                                 if curr not in opts: curr = opts[0]
 
                                             new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
@@ -670,9 +694,30 @@ elif tab == "My Gallery":
                                                 sea_lbl = "Vol." if is_comic else "S"
                                                 ep_lbl = "Ch." if is_comic else "E"
                                                 
+                                                # DYNAMIC COUNTS FOR SHOWS
+                                                total_available = "?"
+                                                if not is_comic and tmdb_id:
+                                                    # Fetch show details dynamically
+                                                    season_info = get_season_details(tmdb_id, c_sea)
+                                                    show_info = get_show_overview(tmdb_id)
+                                                    
+                                                    if season_info:
+                                                        st.caption(f"📺 S{c_sea} has {season_info['episode_count']} eps")
+                                                        total_available = season_info['episode_count']
+                                                    if show_info:
+                                                        st.caption(f"📚 Total Seasons: {show_info.get('number_of_seasons', '?')}")
+
+                                                # DYNAMIC COUNTS FOR COMICS
+                                                elif is_comic:
+                                                    # Use the stored Total_Eps (which stores chapters)
+                                                    st.caption(f"📚 Total: {item.get('Total_Eps', '?')} Chs")
+                                                
                                                 col_s, col_e = st.columns(2)
                                                 with col_s: new_sea = st.number_input(sea_lbl, min_value=1, value=c_sea, key=f"s_{unique_key}")
-                                                with col_e: new_ep = st.number_input(ep_lbl, min_value=0, value=c_ep, key=f"e_{unique_key}")
+                                                with col_e: 
+                                                    # Show progress like "E 5 / 12" if we know the max
+                                                    lbl = f"{ep_lbl} ({total_available})" if total_available != "?" else ep_lbl
+                                                    new_ep = st.number_input(lbl, min_value=0, value=c_ep, key=f"e_{unique_key}")
                                             else: new_sea, new_ep = 1, 0
 
                                             c_sv, c_dl = st.columns(2)
