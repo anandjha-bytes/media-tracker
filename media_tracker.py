@@ -118,10 +118,15 @@ def fetch_details_and_add(item):
             total_eps = getattr(details, 'number_of_episodes', "?")
         except: pass
 
+    # DETERMINE DEFAULT STATUS BASED ON TYPE
+    default_status = "Plan to Watch"
+    if item['Type'] in ["Manga", "Manhwa", "Manhua"]:
+        default_status = "Plan to Read"
+
     try:
         row_data = [
             item['Title'], item['Type'], item['Country'],
-            "Plan to Watch", item['Genres'], item['Image'], 
+            default_status, item['Genres'], item['Image'], 
             item['Overview'], item['Rating'], item['Backdrop'], 
             1, 0, total_eps, total_seasons, media_id
         ]
@@ -470,6 +475,19 @@ elif tab == "My Gallery":
             # Create DataFrame (Index 0, 1, 2... represents the row number)
             df = pd.DataFrame(safe_rows, columns=HEADERS)
             
+            # --- FILTER BAR ---
+            with st.expander("Filter Collection", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                with c1: filter_text = st.text_input("Search Title")
+                with c2: filter_type = st.multiselect("Filter Type", df['Type'].unique())
+                with c3: filter_status = st.multiselect("Status", ["Plan to Watch", "Plan to Read", "Watching", "Reading", "Completed", "Dropped"])
+            
+            if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
+            if filter_type: df = df[df['Type'].isin(filter_type)]
+            if filter_status: df = df[df['Status'].isin(filter_status)]
+
+            st.divider()
+
             # 1. Get Unique Types for Tabs
             unique_types = sorted(df['Type'].unique().tolist())
             
@@ -619,10 +637,27 @@ elif tab == "My Gallery":
 
                                         # --- MANAGE EXPANDER ---
                                         with st.expander("⚙️ Manage"):
-                                            # Status Management
-                                            opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
-                                            curr = item.get('Status', 'Plan to Watch')
-                                            if curr not in opts: curr = "Plan to Watch"
+                                            # Status Management Logic
+                                            is_comic = item['Type'] in ["Manga", "Manhwa", "Manhua"]
+                                            
+                                            if is_comic:
+                                                opts = ["Plan to Read", "Reading", "Completed", "Dropped"]
+                                            else:
+                                                opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
+
+                                            # Smart Migration (Handle old DB values)
+                                            curr = item.get('Status', opts[0])
+                                            
+                                            # If current status isn't in valid options, try to map it
+                                            if curr not in opts:
+                                                if curr == "Plan to Watch" and is_comic: curr = "Plan to Read"
+                                                elif curr == "Watching" and is_comic: curr = "Reading"
+                                                elif curr == "Plan to Read" and not is_comic: curr = "Plan to Watch"
+                                                elif curr == "Reading" and not is_comic: curr = "Watching"
+                                                
+                                                # Fallback if still invalid
+                                                if curr not in opts: curr = opts[0]
+
                                             new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
                                             
                                             # Ep/Season Management
@@ -632,7 +667,6 @@ elif tab == "My Gallery":
                                                 try: c_ep = int(item.get('Current_Ep', 0))
                                                 except: c_ep = 0
                                                 
-                                                is_comic = item['Type'] in ["Manga", "Manhwa", "Manhua"]
                                                 sea_lbl = "Vol." if is_comic else "S"
                                                 ep_lbl = "Ch." if is_comic else "E"
                                                 
