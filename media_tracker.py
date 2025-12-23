@@ -190,12 +190,28 @@ def get_streaming_info(tmdb_id, media_type, country_code):
         r = requests.get(url)
         data = r.json()
         if 'results' in data and country_code in data['results']:
+            # Returns the raw data which includes 'link', 'flatrate', 'rent', 'buy'
             return data['results'][country_code]
         else: return None
     except: return None
 
+# Helper to generate a generic search link for providers
+def get_provider_link(provider_name, title):
+    q = urllib.parse.quote(title)
+    p = provider_name.lower()
+    if 'netflix' in p: return f"https://www.netflix.com/search?q={q}"
+    if 'disney' in p: return f"https://www.disneyplus.com/search?q={q}"
+    if 'amazon' in p or 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
+    if 'hulu' in p: return f"https://www.hulu.com/search?q={q}"
+    if 'apple' in p: return f"https://tv.apple.com/search?term={q}"
+    if 'hbo' in p or 'max' in p: return f"https://www.max.com/search?q={q}"
+    if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
+    if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
+    if 'youtube' in p or 'google play' in p: return f"https://www.youtube.com/results?search_query={q}"
+    # Fallback to Google Search
+    return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
+
 def fetch_anime_details(title):
-    # Search Anilist for Trailer & Links
     query = '''
     query ($s: String) {
         Page(perPage: 1) {
@@ -221,11 +237,9 @@ def get_tmdb_trailer(tmdb_id, media_type):
         r = requests.get(url)
         data = r.json()
         if 'results' in data:
-            # Prioritize Official Trailer
             for vid in data['results']:
                 if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
-            # Fallback to any Teaser/Clip
             for vid in data['results']:
                 if vid['site'] == 'YouTube':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
@@ -337,37 +351,6 @@ def process_tmdb(res, media_kind, results_list, selected_types, selected_genres)
         "Total_Eps": "?", 
         "ID": getattr(res, 'id', None)
     })
-
-def fetch_anilist(query, type_, genres=None, sort_opt="Popularity", page=1, country=None):
-    anilist_sort = "POPULARITY_DESC"
-    if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
-    elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
-    
-    variables = {'t': type_, 'p': page, 'sort': [anilist_sort]}
-    query_args = ["$p: Int", "$t: MediaType", "$sort: [MediaSort]"]
-    media_args = ["type: $t", "sort: $sort"]
-    
-    if query:
-        query_args.append("$s: String"); media_args.append("search: $s"); variables['s'] = query
-    if genres:
-        query_args.append("$g: [String]"); media_args.append("genre_in: $g"); variables['g'] = genres
-    if country:
-        query_args.append("$c: CountryCode"); media_args.append("countryOfOrigin: $c"); variables['c'] = country
-
-    query_str = f'''
-    query ({', '.join(query_args)}) {{ 
-      Page(page: $p, perPage: 15) {{ 
-        media({', '.join(media_args)}) {{ 
-          title {{ romaji english }} coverImage {{ large }} bannerImage genres countryOfOrigin type description averageScore episodes chapters 
-          externalLinks {{ site url }}
-        }} 
-      }} 
-    }}'''
-    try:
-        r = requests.post('https://graphql.anilist.co', json={'query': query_str, 'variables': variables})
-        if r.status_code == 200: return r.json()['data']['Page']['media']
-        else: return []
-    except: return []
 
 def process_anilist(res, api_type, results_list, selected_types, selected_genres):
     origin = res.get('countryOfOrigin', 'JP')
@@ -588,7 +571,6 @@ elif tab == "My Gallery":
                                             
                                             # 1. ANIME Logic
                                             if item['Type'] == "Anime":
-                                                # Crunchyroll check (simplified via smart search due to API limits)
                                                 st.link_button("🟠 Search Crunchyroll", f"https://www.crunchyroll.com/search?q={item['Title']}")
                                                 st.link_button("📺 Search Anikai.to", f"https://www.google.com/search?q=site:anikai.to+{item['Title']}")
                                             
@@ -604,15 +586,34 @@ elif tab == "My Gallery":
                                             # 4. GENERAL (Movies/Series) - Official TMDB Providers
                                             if item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Anime"]:
                                                 provs = get_streaming_info(tmdb_id, m_type, country_code)
-                                                if provs and 'flatrate' in provs:
-                                                    st.write("**Streaming:**")
-                                                    for p in provs['flatrate']:
-                                                        st.markdown(f"- {p['provider_name']}")
-                                                elif provs and 'rent' in provs:
-                                                    st.write("**Rent:**")
-                                                    for p in provs['rent']:
-                                                        st.markdown(f"- {p['provider_name']}")
-                                                else:
+                                                has_streams = False
+                                                
+                                                if provs:
+                                                    # STREAMING (Flatrate)
+                                                    if 'flatrate' in provs:
+                                                        st.write("**Streaming:**")
+                                                        for p in provs['flatrate']:
+                                                            lnk = get_provider_link(p['provider_name'], item['Title'])
+                                                            st.markdown(f"- [{p['provider_name']}]({lnk})")
+                                                        has_streams = True
+                                                    
+                                                    # RENT
+                                                    if 'rent' in provs:
+                                                        st.write("**Rent:**")
+                                                        for p in provs['rent']:
+                                                            lnk = get_provider_link(p['provider_name'], item['Title'])
+                                                            st.markdown(f"- [{p['provider_name']}]({lnk})")
+                                                        has_streams = True
+                                                    
+                                                    # BUY
+                                                    if 'buy' in provs:
+                                                        st.write("**Buy:**")
+                                                        for p in provs['buy']:
+                                                            lnk = get_provider_link(p['provider_name'], item['Title'])
+                                                            st.markdown(f"- [{p['provider_name']}]({lnk})")
+                                                        has_streams = True
+                                                
+                                                if not has_streams:
                                                     st.caption("No official streams found.")
 
                                         # --- MANAGE EXPANDER ---
