@@ -172,21 +172,6 @@ def bulk_update_order(new_df):
     st.rerun()
 
 # --- HELPERS ---
-def generate_provider_link(provider_name, title):
-    q = urllib.parse.quote(title)
-    p = provider_name.lower()
-    if 'netflix' in p: return f"https://www.netflix.com/search?q={q}"
-    if 'disney' in p: return f"https://www.disneyplus.com/search?q={q}"
-    if 'amazon' in p or 'prime' in p: return f"https://www.amazon.com/s?k={q}&i=instant-video"
-    if 'hulu' in p: return f"https://www.hulu.com/search?q={q}"
-    if 'apple' in p: return f"https://tv.apple.com/search?term={q}"
-    if 'hbo' in p or 'max' in p: return f"https://www.max.com/search?q={q}"
-    if 'crunchyroll' in p: return f"https://www.crunchyroll.com/search?q={q}"
-    if 'hotstar' in p: return f"https://www.hotstar.com/in/search?q={q}"
-    if 'jiocinema' in p: return f"https://www.jiocinema.com/search?q={q}"
-    if 'viki' in p: return f"https://www.viki.com/search?q={q}"
-    return f"https://www.google.com/search?q=watch+{q}+on+{urllib.parse.quote(provider_name)}"
-
 def recover_tmdb_id(title, media_type):
     search = Search()
     try:
@@ -206,10 +191,11 @@ def get_streaming_info(tmdb_id, media_type, country_code):
         data = r.json()
         if 'results' in data and country_code in data['results']:
             return data['results'][country_code]
-        else: return "No Info"
+        else: return None
     except: return None
 
 def fetch_anime_details(title):
+    # Search Anilist for Trailer & Links
     query = '''
     query ($s: String) {
         Page(perPage: 1) {
@@ -235,9 +221,11 @@ def get_tmdb_trailer(tmdb_id, media_type):
         r = requests.get(url)
         data = r.json()
         if 'results' in data:
+            # Prioritize Official Trailer
             for vid in data['results']:
                 if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
+            # Fallback to any Teaser/Clip
             for vid in data['results']:
                 if vid['site'] == 'YouTube':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
@@ -469,8 +457,17 @@ if tab == "Search & Add":
 
 # --- GALLERY TAB ---
 elif tab == "My Gallery":
-    st.subheader("My Library")
     
+    # 1. STREAMING COUNTRY SELECTION
+    col_h, col_c = st.columns([3, 1])
+    with col_h: st.subheader("My Library")
+    with col_c:
+        # Default to India if available, else first
+        try: def_ix = list(tmdb_countries.keys()).index("India")
+        except: def_ix = 0
+        stream_country = st.selectbox("Streaming Country", list(tmdb_countries.keys()), index=def_ix)
+        country_code = tmdb_countries[stream_country]
+
     sheet = get_google_sheet()
     
     if sheet:
@@ -518,35 +515,27 @@ elif tab == "My Gallery":
                                         original_indices = subset.index.tolist()
                                         
                                         # 2. Map Titles to their Row Indices (Handle Duplicates)
-                                        # Example: "Naruto" -> [Row 5, Row 12]
                                         title_map = {}
                                         for idx in original_indices:
                                             title_val = df.loc[idx, 'Title']
                                             if title_val not in title_map: title_map[title_val] = []
                                             title_map[title_val].append(idx)
                                         
-                                        # 3. Build the new list of indices based on the user's sorted titles
+                                        # 3. Build the new list of indices
                                         new_order_indices = []
                                         for title in sorted_titles:
                                             if title in title_map and title_map[title]:
-                                                # Pop the first available index for this title
                                                 new_order_indices.append(title_map[title].pop(0))
                                         
-                                        # 4. Apply this new order to the Global DataFrame
-                                        # We keep non-category items where they are, and just shuffle the category items
+                                        # 4. Apply new order to Global DataFrame
                                         final_global_indices = df.index.tolist()
-                                        
-                                        # Sort the original slots (so we fill them top-to-bottom)
                                         slots_to_fill = sorted(original_indices)
                                         
-                                        # Place the new sorted items into those slots
                                         for slot, new_idx in zip(slots_to_fill, new_order_indices):
                                             final_global_indices[slot] = new_idx
                                             
-                                        # 5. Reorder the actual DataFrame
+                                        # 5. Reorder & Save
                                         new_df = df.iloc[final_global_indices].reset_index(drop=True)
-                                        
-                                        # 6. Save
                                         bulk_update_order(new_df)
 
                         # --- GRID DISPLAY ---
@@ -565,14 +554,68 @@ elif tab == "My Gallery":
                                         st.markdown(f"**{item['Title']}**")
                                         unique_key = f"{category}_{index}"
                                         
+                                        # --- OVERVIEW POPOVER ---
                                         with st.popover("📜 Overview"):
+                                            # A. TRAILER SECTION
+                                            trailer_url = None
+                                            tmdb_id = item.get('ID')
+                                            
+                                            # Recover ID if missing
+                                            m_type = 'movie' if item['Type'] == "Movies" else 'tv'
+                                            if not tmdb_id: 
+                                                tmdb_id = recover_tmdb_id(item['Title'], m_type)
+
+                                            if item['Type'] == "Anime":
+                                                 ani_details = fetch_anime_details(item['Title'])
+                                                 if 'trailer' in ani_details and ani_details['trailer'] and ani_details['trailer']['site'] == 'youtube':
+                                                     trailer_url = f"https://www.youtube.com/watch?v={ani_details['trailer']['id']}"
+                                            elif item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]:
+                                                 trailer_url = get_tmdb_trailer(tmdb_id, m_type)
+
+                                            if trailer_url:
+                                                st.caption("🎬 Trailer")
+                                                st.video(trailer_url)
+
+                                            # B. INFO SECTION
                                             st.write(f"**Status:** {item['Status']}")
                                             st.write(f"**Rating:** {item['Rating']}")
                                             st.caption(item['Overview'])
                                             
-                                            if item['Type'] == "Anime":
-                                                st.link_button("📺 Search Anikai", f"https://www.google.com/search?q=site:anikai.to+{item['Title']}")
+                                            st.divider()
                                             
+                                            # C. STREAMING LINKS (Smart Logic)
+                                            st.caption(f"📺 Watch in {stream_country}")
+                                            
+                                            # 1. ANIME Logic
+                                            if item['Type'] == "Anime":
+                                                # Crunchyroll check (simplified via smart search due to API limits)
+                                                st.link_button("🟠 Search Crunchyroll", f"https://www.crunchyroll.com/search?q={item['Title']}")
+                                                st.link_button("📺 Search Anikai.to", f"https://www.google.com/search?q=site:anikai.to+{item['Title']}")
+                                            
+                                            # 2. MANGA/COMICS Logic
+                                            elif item['Type'] in ["Manga", "Manhwa", "Manhua"]:
+                                                st.link_button("📖 Read on Comix.to", f"https://www.google.com/search?q=site:comix.to+{item['Title']}")
+                                            
+                                            # 3. ASIAN DRAMA Logic
+                                            elif item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
+                                                st.link_button("💙 Watch on Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
+                                                st.link_button("🎎 Watch on KissKH", f"https://www.google.com/search?q=site:kisskh.ws+{item['Title']}")
+                                            
+                                            # 4. GENERAL (Movies/Series) - Official TMDB Providers
+                                            if item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Anime"]:
+                                                provs = get_streaming_info(tmdb_id, m_type, country_code)
+                                                if provs and 'flatrate' in provs:
+                                                    st.write("**Streaming:**")
+                                                    for p in provs['flatrate']:
+                                                        st.markdown(f"- {p['provider_name']}")
+                                                elif provs and 'rent' in provs:
+                                                    st.write("**Rent:**")
+                                                    for p in provs['rent']:
+                                                        st.markdown(f"- {p['provider_name']}")
+                                                else:
+                                                    st.caption("No official streams found.")
+
+                                        # --- MANAGE EXPANDER ---
                                         with st.expander("⚙️ Manage"):
                                             # Status Management
                                             opts = ["Plan to Watch", "Watching", "Completed", "Dropped"]
@@ -587,7 +630,6 @@ elif tab == "My Gallery":
                                                 try: c_ep = int(item.get('Current_Ep', 0))
                                                 except: c_ep = 0
                                                 
-                                                # LOGIC FIX: Check for Manga, Manhwa, OR Manhua
                                                 is_comic = item['Type'] in ["Manga", "Manhwa", "Manhua"]
                                                 sea_lbl = "Vol." if is_comic else "S"
                                                 ep_lbl = "Ch." if is_comic else "E"
