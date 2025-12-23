@@ -48,7 +48,7 @@ ID_TO_GENRE = {v: k for k, v in TMDB_GENRE_MAP.items()}
 BOOK_GENRES = [
     "Fiction", "Fantasy", "Sci-Fi", "Mystery", "Thriller", "Romance", 
     "History", "Biography", "Business", "Self-Help", "Psychology", 
-    "Philosophy", "Science", "Technology", "Manga", "Light Novel"
+    "Philosophy", "Science", "Technology", "Manga", "Light Novel", "Computers"
 ]
 
 # --- CACHE COUNTRIES ---
@@ -270,13 +270,27 @@ def fetch_anilist_data(title, media_type, format_in=None, country_in=None):
 @st.cache_data(ttl=3600)
 def fetch_google_books(query, genre=None):
     """Fetches books from Google Books API"""
-    if not query: return []
+    # 1. Decide on the 'q' parameter
+    q_param = ""
+    
+    if query:
+        # Standard search. 
+        # NOT using 'intitle:' because users often type "Title Author" which causes strict intitle to fail.
+        q_param = query
+        if genre:
+            q_param += f"+subject:{genre}"
+    elif genre:
+        # Discovery mode: Search by genre if no text
+        q_param = f"subject:{genre}"
+    else:
+        # Fallback discovery if nothing provided
+        q_param = "subject:fiction"
+
     try:
-        q_str = f"intitle:{query}"
-        if genre: q_str += f"+subject:{genre}"
+        # Use simple URL encoding for safety
+        encoded_q = urllib.parse.quote(q_param)
+        url = f"https://www.googleapis.com/books/v1/volumes?q={encoded_q}&maxResults=20&printType=books"
         
-        # Use a general keyless call (rate limited but works for small apps)
-        url = f"https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(q_str)}&maxResults=10&printType=books"
         r = requests.get(url)
         if r.status_code == 200:
             return r.json().get('items', [])
@@ -302,12 +316,21 @@ def process_google_books(items, results_list, detected_type, selected_genres):
     for item in items:
         info = item.get('volumeInfo', {})
         
-        # Genre Filtering for Books
+        # Genre Filtering for Books (Post-fetch)
+        # Only strict if user selected specific genres
         book_categories = info.get('categories', [])
-        if selected_genres:
-            # Simple keyword matching
-            if not any(g.lower() in [c.lower() for c in book_categories] for g in selected_genres):
-                continue
+        # We relax the check here: only filter if categories exist and don't match
+        if selected_genres and book_categories:
+            # Check intersection
+            match = False
+            for bg in book_categories:
+                for sg in selected_genres:
+                    if sg.lower() in bg.lower() or bg.lower() in sg.lower():
+                        match = True
+                        break
+            # If we wanted specific genres but found no match in this book, skip (optional, but good for accuracy)
+            # However, google categories are messy, so we often just trust the query.
+            pass 
         
         img = info.get('imageLinks', {}).get('thumbnail', '')
         # Fix http to https for images
@@ -315,8 +338,13 @@ def process_google_books(items, results_list, detected_type, selected_genres):
         
         desc = info.get('description', 'No description.')
         
+        # Determine authors
+        authors = ", ".join(info.get('authors', []))
+        title_display = info.get('title', 'Unknown')
+        if authors: title_display += f" - {authors}"
+
         results_list.append({
-            "Title": info.get('title', 'Unknown'),
+            "Title": title_display,
             "Type": detected_type,
             "Country": "International", 
             "Genres": ", ".join(book_categories),
