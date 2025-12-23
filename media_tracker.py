@@ -45,8 +45,9 @@ TMDB_GENRE_MAP = {
 }
 ID_TO_GENRE = {v: k for k, v in TMDB_GENRE_MAP.items()}
 
+# ADDED "Web Novel" HERE
 BOOK_GENRES = [
-    "Fiction", "Fantasy", "Sci-Fi", "Mystery", "Thriller", "Romance", 
+    "Web Novel", "Fiction", "Fantasy", "Sci-Fi", "Mystery", "Thriller", "Romance", 
     "History", "Biography", "Business", "Self-Help", "Psychology", 
     "Philosophy", "Science", "Technology", "Manga", "Light Novel", "Computers",
     "Horror", "Poetry", "Comics", "Art", "Cooking"
@@ -302,7 +303,6 @@ def fetch_open_library(query, genre=None):
         params['subject'] = "fiction" # Default fallback
 
     try:
-        # User-Agent header is polite and prevents blocking
         headers = {'User-Agent': 'MediaTrackerApp/1.0 (streamlit_student_project)'}
         r = requests.get(url, params=params, headers=headers)
         if r.status_code == 200:
@@ -340,7 +340,6 @@ def process_open_library(items, results_list, detected_type):
         authors = ", ".join(author_list[:2])
         if authors: title += f" - {authors}"
         
-        # Use first publish year as description since summary isn't always in search results
         desc = f"First published in {item.get('first_publish_year', 'Unknown')}."
         if item.get('first_sentence'):
              desc = f"\"{item['first_sentence'][0]}\" - " + desc
@@ -369,10 +368,6 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
         if forced_type == "Manhwa" and origin != "KR": continue
         if forced_type == "Manhua" and origin != "CN": continue
         
-        # Novels are allowed to be cross-origin if they are light novels
-        if forced_type == "Novel":
-             pass 
-
         res_genres = res.get('genres', [])
         if selected_genres:
             if not any(g in res_genres for g in selected_genres): continue
@@ -418,7 +413,6 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         
         def run_tmdb(media_kind, specific_type, lang_filter=None):
             try:
-                # SMART QUERY: Append keyword to help TMDB Search find specific country content
                 active_q = query
                 if query and specific_type == "K-Drama": active_q = f"{query} Korean"
                 elif query and specific_type == "C-Drama": active_q = f"{query} Chinese"
@@ -436,7 +430,6 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                 for r in results:
                     res_lang = getattr(r, 'original_language', 'en')
                     match = True
-                    # Relaxed matching for Search mode
                     if not query:
                         if specific_type == "K-Drama" and res_lang != 'ko': match = False
                         elif specific_type == "C-Drama" and res_lang != 'zh': match = False
@@ -452,7 +445,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         if "C-Drama" in selected_types: run_tmdb("TV", "C-Drama", "zh")
         if "Thai Drama" in selected_types: run_tmdb("TV", "Thai Drama", "th")
 
-    # 2. ANILIST (Anime, Donghua, Comics, Light Novels)
+    # 2. ANILIST (Anime, Donghua, Novels)
     if any(t in selected_types for t in ["Anime", "Donghua", "Novel", "Manga", "Manhwa", "Manhua"]):
         # Anime
         if "Anime" in selected_types: 
@@ -473,12 +466,20 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN")
             process_anilist_results(r, results_data, "Manhua", selected_genres)
 
-        # Light Novels (Format: Novel)
+        # WEB NOVELS / LIGHT NOVELS
         if "Novel" in selected_types:
-             r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
-             process_anilist_results(r, results_data, "Novel", selected_genres)
+             # A. Search AniList for Light Novels (Japan)
+             r1 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
+             process_anilist_results(r1, results_data, "Novel", selected_genres)
+             
+             # B. If "Web Novel" genre is specifically selected, try Korean/Chinese
+             if "Web Novel" in selected_genres:
+                 r2 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="KR", format="NOVEL")
+                 process_anilist_results(r2, results_data, "Novel", selected_genres)
+                 r3 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN", format="NOVEL")
+                 process_anilist_results(r3, results_data, "Novel", selected_genres)
 
-    # 3. OPEN LIBRARY (Western Books / Web Novels)
+    # 3. OPEN LIBRARY (Western Books / Web Novels Backup)
     if "Book" in selected_types or "Novel" in selected_types:
         target_genre = None
         if selected_genres:
@@ -486,7 +487,6 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             if book_genres: target_genre = book_genres[0]
 
         if "Novel" in selected_types:
-             # Search Open Library with novel bias
              q_mod = query + " novel" if query else "fantasy novel"
              items = fetch_open_library(q_mod, genre=target_genre)
              process_open_library(items, results_data, "Novel")
