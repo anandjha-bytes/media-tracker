@@ -302,7 +302,7 @@ def fetch_open_library(query, genre=None):
         # Discovery Mode
         params['subject'] = genre
     else:
-        params['subject'] = "fiction" 
+        params['subject'] = "fiction" # Default fallback
 
     try:
         # User-Agent header to avoid basic blocking
@@ -392,6 +392,10 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
         
         total = res.get('episodes') or res.get('chapters') or res.get('volumes') or "?"
         
+        # FIX: Handle potential None value for score
+        avg_score = res.get('averageScore')
+        rating_str = f"{avg_score/10}/10" if avg_score else "?/10"
+        
         results_list.append({
             "Title": res['title']['english'] if res['title']['english'] else res['title']['romaji'],
             "Type": final_type,
@@ -399,7 +403,7 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
             "Genres": ", ".join(res_genres),
             "Image": res.get('coverImage', {}).get('large', ''),
             "Overview": clean,
-            "Rating": f"{res.get('averageScore', 0)/10}/10",
+            "Rating": rating_str,
             "Backdrop": res.get('bannerImage', ''),
             "Total_Eps": total,
             "ID": None,
@@ -461,6 +465,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
 
     # 2. ANILIST (Anime, Donghua, Novels)
     if any(t in selected_types for t in ["Anime", "Donghua", "Novel", "Manga", "Manhwa", "Manhua"]):
+        # Anime
         if "Anime" in selected_types: 
             r = fetch_anilist_list(query, "ANIME", selected_genres, sort_option, page, country=None)
             process_anilist_results(r, results_data, "Anime", selected_genres)
@@ -468,6 +473,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             r = fetch_anilist_list(query, "ANIME", selected_genres, sort_option, page, country="CN")
             process_anilist_results(r, results_data, "Donghua", selected_genres)
         
+        # Comics
         if "Manga" in selected_types:
             r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="JP")
             process_anilist_results(r, results_data, "Manga", selected_genres)
