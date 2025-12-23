@@ -587,8 +587,10 @@ elif tab == "My Gallery":
                                                 try: c_ep = int(item.get('Current_Ep', 0))
                                                 except: c_ep = 0
                                                 
-                                                sea_lbl = "Vol." if "Manga" in item['Type'] else "S"
-                                                ep_lbl = "Ch." if "Manga" in item['Type'] else "E"
+                                                # LOGIC FIX: Check for Manga, Manhwa, OR Manhua
+                                                is_comic = item['Type'] in ["Manga", "Manhwa", "Manhua"]
+                                                sea_lbl = "Vol." if is_comic else "S"
+                                                ep_lbl = "Ch." if is_comic else "E"
                                                 
                                                 col_s, col_e = st.columns(2)
                                                 with col_s: new_sea = st.number_input(sea_lbl, min_value=1, value=c_sea, key=f"s_{unique_key}")
