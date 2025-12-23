@@ -105,7 +105,6 @@ def fetch_details_and_add(item):
     sheet = get_google_sheet()
     if not sheet: return False
     
-    # 🔒 DUPLICATE CHECK
     try:
         existing_titles = sheet.col_values(1)
         if item['Title'] in existing_titles:
@@ -263,27 +262,27 @@ def fetch_anilist_data(title, media_type, format_in=None, country_in=None):
 @st.cache_data(ttl=3600)
 def fetch_google_books(query, genre=None):
     """
-    Robust Google Books Fetcher (Fixed for broad searching)
+    Robust Google Books Fetcher (Fixed headers & fallback)
     """
     url = "https://www.googleapis.com/books/v1/volumes"
-    params = {'maxResults': 20, 'printType': 'books'}
+    # IMPORTANT: User-Agent header prevents Google from blocking the script
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     
-    if query and query.strip():
-        # User typed something: Prioritize the query text
-        # If a genre is ALSO selected, add it loosely to help context
-        q_val = query.strip()
-        if genre:
-            q_val += f" subject:{genre}"
-        params['q'] = q_val
+    q_val = ""
+    if query:
+        q_val = query
+        if genre: q_val += f" subject:{genre}"
     elif genre:
-        # User only selected a genre, no text
-        params['q'] = f"subject:{genre}"
+        q_val = f"subject:{genre}"
     else:
-        # Fallback (e.g. user just clicked search with empty inputs)
-        params['q'] = "subject:fiction"
+        q_val = "subject:fiction"
+
+    params = {'q': q_val, 'maxResults': 20, 'printType': 'books'}
 
     try:
-        r = requests.get(url, params=params)
+        r = requests.get(url, params=params, headers=headers)
         if r.status_code == 200:
             return r.json().get('items', [])
     except: pass
@@ -365,7 +364,7 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # 1. VISUAL MEDIA (Movies, Shows, Asian Dramas)
+    # 1. VISUAL MEDIA
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         g_ids = ""
@@ -382,7 +381,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         
         def run_tmdb(media_kind, specific_type, lang_filter=None):
             try:
-                # If query exists, use Search (lenient). If not, use Discover (strict).
+                # Use Search if text provided, otherwise Discover
                 if query:
                     if media_kind == "Movie": results = search.movies(query, page=page)
                     else: results = search.tv_shows(query, page=page)
@@ -390,17 +389,22 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                     kwargs = {'sort_by': tmdb_sort, 'page': page, 'vote_count.gte': 5}
                     if g_ids: kwargs['with_genres'] = g_ids
                     if lang_filter: kwargs['with_original_language'] = lang_filter
-                    
                     if media_kind == "Movie": results = discover.discover_movies(kwargs)
                     else: results = discover.discover_tv_shows(kwargs)
 
                 for r in results:
                     res_lang = getattr(r, 'original_language', 'en')
                     match = True
-                    if specific_type == "K-Drama" and res_lang != 'ko': match = False
-                    elif specific_type == "C-Drama" and res_lang != 'zh': match = False
-                    elif specific_type == "Thai Drama" and res_lang != 'th': match = False
-                    
+                    # Relaxed matching for Search mode (Titles might be multi-lingual)
+                    if not query:
+                        if specific_type == "K-Drama" and res_lang != 'ko': match = False
+                        elif specific_type == "C-Drama" and res_lang != 'zh': match = False
+                        elif specific_type == "Thai Drama" and res_lang != 'th': match = False
+                    else:
+                        # In search mode, be permissive if user typed a specific title
+                        if specific_type == "K-Drama" and res_lang not in ['ko']: match = False 
+                        # (Still enforce basic lang check to avoid noise)
+
                     if match:
                         process_tmdb_result(r, media_kind, results_data, selected_types, selected_genres)
             except: pass
@@ -442,10 +446,9 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             if book_genres: target_genre = book_genres[0]
 
         if "Novel" in selected_types:
-             # Search Google Books with specific query modification
-             novel_query = query if query else "fiction"
-             if query: novel_query += " novel" # Bias towards novels
-             items = fetch_google_books(novel_query, genre=target_genre)
+             # Force 'novel' keyword if no genre, helps find books
+             q_mod = query + " novel" if query else ""
+             items = fetch_google_books(q_mod, genre=target_genre)
              process_google_books(items, results_data, "Novel")
              
         if "Book" in selected_types:
