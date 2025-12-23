@@ -48,7 +48,8 @@ ID_TO_GENRE = {v: k for k, v in TMDB_GENRE_MAP.items()}
 BOOK_GENRES = [
     "Fiction", "Fantasy", "Sci-Fi", "Mystery", "Thriller", "Romance", 
     "History", "Biography", "Business", "Self-Help", "Psychology", 
-    "Philosophy", "Science", "Technology", "Manga", "Light Novel", "Computers"
+    "Philosophy", "Science", "Technology", "Manga", "Light Novel", "Computers",
+    "Horror", "Poetry", "Comics", "Art", "Cooking"
 ]
 
 # --- CACHE COUNTRIES ---
@@ -227,12 +228,6 @@ def get_season_details(tmdb_id, season_num):
 
 @st.cache_data(ttl=3600)
 def fetch_anilist_data(title, media_type, format_in=None, country_in=None):
-    """
-    Unified AniList Fetcher.
-    media_type: 'ANIME' or 'MANGA'
-    format_in: 'NOVEL', 'TV', etc.
-    country_in: 'CN' (for Donghua)
-    """
     query = '''
     query ($s: String, $t: MediaType, $f: MediaFormat, $c: CountryCode) {
         Page(perPage: 1) {
@@ -269,25 +264,28 @@ def fetch_anilist_data(title, media_type, format_in=None, country_in=None):
 
 @st.cache_data(ttl=3600)
 def fetch_google_books(query, genre=None):
-    """Fetches books from Google Books API"""
-    # 1. Decide on the 'q' parameter
-    q_param = ""
+    """
+    Fetches books from Google Books API.
+    Supports Author/Title search + Genre filtering.
+    """
+    search_terms = []
     
     if query:
-        # Standard search. 
-        # NOT using 'intitle:' because users often type "Title Author" which causes strict intitle to fail.
-        q_param = query
-        if genre:
-            q_param += f"+subject:{genre}"
-    elif genre:
-        # Discovery mode: Search by genre if no text
-        q_param = f"subject:{genre}"
-    else:
-        # Fallback discovery if nothing provided
-        q_param = "subject:fiction"
+        # User entered text (could be title, author, or both)
+        search_terms.append(query)
+        
+    if genre:
+        # User selected a genre
+        search_terms.append(f"subject:{genre}")
+    
+    # If both are empty, default to general fiction
+    if not search_terms:
+        search_terms.append("subject:fiction")
+
+    # Combine terms with spaces (Google API handles space as logical AND usually)
+    q_param = " ".join(search_terms)
 
     try:
-        # Use simple URL encoding for safety
         encoded_q = urllib.parse.quote(q_param)
         url = f"https://www.googleapis.com/books/v1/volumes?q={encoded_q}&maxResults=20&printType=books"
         
@@ -308,6 +306,9 @@ def get_tmdb_trailer(tmdb_id, media_type):
             for vid in data['results']:
                 if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
+            for vid in data['results']:
+                if vid['site'] == 'YouTube':
+                    return f"https://www.youtube.com/watch?v={vid['key']}"
     except: return None
     return None
 
@@ -316,29 +317,16 @@ def process_google_books(items, results_list, detected_type, selected_genres):
     for item in items:
         info = item.get('volumeInfo', {})
         
-        # Genre Filtering for Books (Post-fetch)
-        # Only strict if user selected specific genres
+        # Genre Filtering (Soft Check)
         book_categories = info.get('categories', [])
-        # We relax the check here: only filter if categories exist and don't match
-        if selected_genres and book_categories:
-            # Check intersection
-            match = False
-            for bg in book_categories:
-                for sg in selected_genres:
-                    if sg.lower() in bg.lower() or bg.lower() in sg.lower():
-                        match = True
-                        break
-            # If we wanted specific genres but found no match in this book, skip (optional, but good for accuracy)
-            # However, google categories are messy, so we often just trust the query.
-            pass 
         
+        # Image Fix
         img = info.get('imageLinks', {}).get('thumbnail', '')
-        # Fix http to https for images
         if img.startswith('http://'): img = img.replace('http://', 'https://')
         
         desc = info.get('description', 'No description.')
         
-        # Determine authors
+        # Author + Title Display
         authors = ", ".join(info.get('authors', []))
         title_display = info.get('title', 'Unknown')
         if authors: title_display += f" - {authors}"
@@ -351,8 +339,8 @@ def process_google_books(items, results_list, detected_type, selected_genres):
             "Image": img,
             "Overview": desc,
             "Rating": f"{info.get('averageRating', 0)}/5",
-            "Backdrop": "", # Google books doesn't have backdrops usually
-            "Total_Eps": str(info.get('pageCount', '?')), # Storing Pages in Total_Eps col
+            "Backdrop": "",
+            "Total_Eps": str(info.get('pageCount', '?')), 
             "ID": item.get('id'),
             "Source": "GoogleBooks"
         })
@@ -360,8 +348,6 @@ def process_google_books(items, results_list, detected_type, selected_genres):
 def process_anilist_results(res_list, results_list, forced_type, selected_genres):
     for res in res_list:
         origin = res.get('countryOfOrigin', 'JP')
-        
-        # Refine Type
         final_type = forced_type
         if forced_type == "Donghua" and origin != "CN": continue
         
@@ -393,11 +379,10 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
     
-    # 1. TMDB (Movies, TV)
+    # 1. TMDB
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         g_ids = ""
-        # Only use TMDB genre map if searching visual media
         tmdb_genres = [g for g in selected_genres if g in TMDB_GENRE_MAP]
         if tmdb_genres:
              ids = [str(TMDB_GENRE_MAP.get(g)) for g in tmdb_genres]
@@ -409,15 +394,12 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         discover = Discover()
         search = Search()
         
-        # Logic to decide Discover vs Search
         if not query:
              kwargs = {'sort_by': tmdb_sort, 'with_genres': g_ids, 'page': page, 'vote_count.gte': 10}
-             # Handle Movies
              if "Movies" in selected_types:
                  try: 
                     for r in discover.discover_movies(kwargs): process_tmdb_result(r, "Movie", results_data, selected_types, tmdb_genres)
                  except: pass
-             # Handle TV
              if any(t in ["Web Series", "K-Drama", "C-Drama", "Thai Drama"] for t in selected_types):
                  try:
                     for r in discover.discover_tv_shows(kwargs): process_tmdb_result(r, "TV", results_data, selected_types, tmdb_genres)
@@ -432,9 +414,8 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                     for r in search.tv_shows(query, page=page): process_tmdb_result(r, "TV", results_data, selected_types, tmdb_genres)
                  except: pass
 
-    # 2. ANILIST (Anime, Donghua, Asian Novels)
+    # 2. ANILIST
     if "Anime" in selected_types or "Donghua" in selected_types or "Novel" in selected_types or any(t in selected_types for t in ["Manga", "Manhwa", "Manhua"]):
-        # A. ANIME / DONGHUA
         if "Anime" in selected_types: 
             r = fetch_anilist_list(query, "ANIME", selected_genres, sort_option, page, country=None)
             process_anilist_results(r, results_data, "Anime", selected_genres)
@@ -443,30 +424,25 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             r = fetch_anilist_list(query, "ANIME", selected_genres, sort_option, page, country="CN")
             process_anilist_results(r, results_data, "Donghua", selected_genres)
 
-        # B. COMICS
         comic_types = [t for t in selected_types if t in ["Manga", "Manhwa", "Manhua"]]
         for ct in comic_types:
              country_code = {"Manhwa": "KR", "Manhua": "CN", "Manga": "JP"}.get(ct)
              r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country=country_code)
              process_anilist_results(r, results_data, ct, selected_genres)
 
-        # C. LIGHT NOVELS (Part of 'Novel' selection)
         if "Novel" in selected_types:
              r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
              process_anilist_results(r, results_data, "Novel", selected_genres)
 
-    # 3. GOOGLE BOOKS (Book, Western Novel)
+    # 3. GOOGLE BOOKS
     if "Book" in selected_types or "Novel" in selected_types:
-        # Determine genres for books
         book_genres = [g for g in selected_genres if g in BOOK_GENRES]
         target_genre = book_genres[0] if book_genres else None
         
-        # If Novel selected, force fiction search in Google Books
         if "Novel" in selected_types:
-             items = fetch_google_books(query, genre="fiction")
+             items = fetch_google_books(query, genre=target_genre if target_genre else "fiction")
              process_google_books(items, results_data, "Novel", selected_genres)
              
-        # If Book selected
         if "Book" in selected_types:
              items = fetch_google_books(query, genre=target_genre)
              process_google_books(items, results_data, "Book", selected_genres)
@@ -561,7 +537,6 @@ if tab == "Search & Add":
         
         # DYNAMIC GENRES
         current_genres = list(TMDB_GENRE_MAP.keys())
-        # If User selects Books or Novels, switch/add genres
         if "Book" in selected_types or "Novel" in selected_types:
              current_genres = sorted(list(set(current_genres + BOOK_GENRES)))
 
