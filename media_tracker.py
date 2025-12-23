@@ -45,7 +45,6 @@ TMDB_GENRE_MAP = {
 }
 ID_TO_GENRE = {v: k for k, v in TMDB_GENRE_MAP.items()}
 
-# ADDED "Web Novel" HERE
 BOOK_GENRES = [
     "Web Novel", "Fiction", "Fantasy", "Sci-Fi", "Mystery", "Thriller", "Romance", 
     "History", "Biography", "Business", "Self-Help", "Psychology", 
@@ -287,26 +286,34 @@ def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, forma
     return []
 
 @st.cache_data(ttl=3600)
-def fetch_open_library(query, genre=None):
+def fetch_google_books(query, genre=None):
     """
-    Fetches books from Open Library (No API Key needed)
+    Robust Google Books Fetcher (Uses User-Agent to avoid blocking)
     """
-    url = "https://openlibrary.org/search.json"
+    url = "https://www.googleapis.com/books/v1/volumes"
     
-    params = {'limit': 15}
+    # FAKE BROWSER HEADER - This is critical for getting results
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    q_val = ""
     if query:
-        params['q'] = query
-        if genre: params['q'] += f" subject:{genre}"
+        q_val = query
+        # Loose genre matching
+        if genre and genre not in ["Web Novel"]: # Web Novel isn't a google category
+            q_val += f" subject:{genre}"
     elif genre:
-        params['subject'] = genre
+        q_val = f"subject:{genre}"
     else:
-        params['subject'] = "fiction" # Default fallback
+        q_val = "subject:fiction"
+
+    params = {'q': q_val, 'maxResults': 20, 'printType': 'books'}
 
     try:
-        headers = {'User-Agent': 'MediaTrackerApp/1.0 (streamlit_student_project)'}
         r = requests.get(url, params=params, headers=headers)
         if r.status_code == 200:
-            return r.json().get('docs', [])
+            return r.json().get('items', [])
     except: pass
     return []
 
@@ -328,34 +335,35 @@ def get_tmdb_trailer(tmdb_id, media_type):
     return None
 
 # --- PROCESSORS ---
-def process_open_library(items, results_list, detected_type):
+def process_google_books(items, results_list, detected_type):
     for item in items:
-        # Open Library Cover
-        cover_id = item.get('cover_i')
-        img_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else "https://via.placeholder.com/300x450?text=No+Cover"
+        info = item.get('volumeInfo', {})
         
-        # Details
-        title = item.get('title', 'Unknown')
-        author_list = item.get('author_name', [])
-        authors = ", ".join(author_list[:2])
-        if authors: title += f" - {authors}"
-        
-        desc = f"First published in {item.get('first_publish_year', 'Unknown')}."
-        if item.get('first_sentence'):
-             desc = f"\"{item['first_sentence'][0]}\" - " + desc
+        # Images
+        img = info.get('imageLinks', {}).get('thumbnail', '')
+        if img.startswith('http://'): img = img.replace('http://', 'https://')
+        if not img: img = "https://via.placeholder.com/300x450?text=No+Cover"
+
+        # Authors
+        authors = ", ".join(info.get('authors', []))
+        title_display = info.get('title', 'Unknown')
+        if authors: title_display += f" - {authors}"
+
+        # Desc
+        desc = info.get('description', 'No description.')
         
         results_list.append({
-            "Title": title,
+            "Title": title_display,
             "Type": detected_type,
-            "Country": "International",
-            "Genres": ", ".join(item.get('subject', [])[:3]),
-            "Image": img_url,
+            "Country": "International", 
+            "Genres": ", ".join(info.get('categories', [])),
+            "Image": img,
             "Overview": desc,
-            "Rating": f"{round(item.get('ratings_average', 0), 1)}/5",
+            "Rating": f"{info.get('averageRating', 0)}/5",
             "Backdrop": "",
-            "Total_Eps": str(item.get('number_of_pages_median', '?')),
-            "ID": item.get('key'),
-            "Source": "OpenLibrary"
+            "Total_Eps": str(info.get('pageCount', '?')), 
+            "ID": item.get('id'),
+            "Source": "GoogleBooks"
         })
 
 def process_anilist_results(res_list, results_list, forced_type, selected_genres):
@@ -370,7 +378,10 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
         
         res_genres = res.get('genres', [])
         if selected_genres:
-            if not any(g in res_genres for g in selected_genres): continue
+            # Skip checking "Web Novel" genre tag in Anilist as it doesn't exist
+            filtered_genres = [g for g in selected_genres if g != "Web Novel"]
+            if filtered_genres and not any(g in res_genres for g in filtered_genres): 
+                continue
 
         import re
         raw = res.get('description', '')
@@ -434,7 +445,6 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
                         if specific_type == "K-Drama" and res_lang != 'ko': match = False
                         elif specific_type == "C-Drama" and res_lang != 'zh': match = False
                         elif specific_type == "Thai Drama" and res_lang != 'th': match = False
-                    
                     if match:
                         process_tmdb_result(r, media_kind, results_data, selected_types, selected_genres)
             except: pass
@@ -447,7 +457,7 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
 
     # 2. ANILIST (Anime, Donghua, Novels)
     if any(t in selected_types for t in ["Anime", "Donghua", "Novel", "Manga", "Manhwa", "Manhua"]):
-        # Anime
+        # Anime / Donghua
         if "Anime" in selected_types: 
             r = fetch_anilist_list(query, "ANIME", selected_genres, sort_option, page, country=None)
             process_anilist_results(r, results_data, "Anime", selected_genres)
@@ -466,20 +476,20 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN")
             process_anilist_results(r, results_data, "Manhua", selected_genres)
 
-        # WEB NOVELS / LIGHT NOVELS
+        # WEB NOVELS / LIGHT NOVELS (AniList Source)
         if "Novel" in selected_types:
-             # A. Search AniList for Light Novels (Japan)
+             # A. Search AniList for Japan (Light Novels)
              r1 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
              process_anilist_results(r1, results_data, "Novel", selected_genres)
              
-             # B. If "Web Novel" genre is specifically selected, try Korean/Chinese
+             # B. If "Web Novel" genre selected, specifically target KR/CN
              if "Web Novel" in selected_genres:
                  r2 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="KR", format="NOVEL")
                  process_anilist_results(r2, results_data, "Novel", selected_genres)
                  r3 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN", format="NOVEL")
                  process_anilist_results(r3, results_data, "Novel", selected_genres)
 
-    # 3. OPEN LIBRARY (Western Books / Web Novels Backup)
+    # 3. GOOGLE BOOKS (Western Books / Web Novels Backup)
     if "Book" in selected_types or "Novel" in selected_types:
         target_genre = None
         if selected_genres:
@@ -487,13 +497,14 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
             if book_genres: target_genre = book_genres[0]
 
         if "Novel" in selected_types:
+             # Append 'novel' to help Google Books find "Shadow Slave" etc
              q_mod = query + " novel" if query else "fantasy novel"
-             items = fetch_open_library(q_mod, genre=target_genre)
-             process_open_library(items, results_data, "Novel")
+             items = fetch_google_books(q_mod, genre=target_genre)
+             process_google_books(items, results_data, "Novel")
              
         if "Book" in selected_types:
-             items = fetch_open_library(query, genre=target_genre)
-             process_open_library(items, results_data, "Book")
+             items = fetch_google_books(query, genre=target_genre)
+             process_google_books(items, results_data, "Book")
 
     return results_data
 
