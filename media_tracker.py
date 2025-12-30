@@ -6,6 +6,7 @@ from tmdbv3api import TMDb, Movie, TV, Search, Genre, Discover
 import requests
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="📚")
@@ -109,7 +110,6 @@ def get_library_data():
             try:
                 # Get all records at once (faster than repeated calls)
                 data = sheet.get_all_records()
-                # Create a lookup dict: Title -> Row Data
                 lib_map = {}
                 for item in data:
                     t = item.get('Title', '').strip()
@@ -132,7 +132,7 @@ def fetch_details_and_add(item):
     sheet = get_google_sheet()
     if not sheet: return False
     
-    # 1. Check Cache first (Instant check)
+    # 1. OPTIMIZED: Check Cache first instead of calling API
     lib_data = get_library_data()
     if item['Title'].strip() in lib_data:
         st.toast(f"⚠️ '{item['Title']}' is already in your library!")
@@ -195,7 +195,6 @@ def update_status_in_sheet(title, new_status, new_season, new_ep):
                     st.session_state.lib_data[title]['Status'] = new_status
                     st.session_state.lib_data[title]['Current_Season'] = new_season
                     st.session_state.lib_data[title]['Current_Ep'] = new_ep
-                time.sleep(0.5)
         except: pass
 
 def delete_from_sheet(title):
@@ -209,7 +208,6 @@ def delete_from_sheet(title):
                 # Update Cache
                 if 'lib_data' in st.session_state and title in st.session_state.lib_data:
                     del st.session_state.lib_data[title]
-                time.sleep(0.5)
         except: pass
 
 def bulk_update_order(new_df):
@@ -297,7 +295,8 @@ def fetch_anilist_data_single(title, media_type, format_in=None):
     return {}
 
 @st.cache_data(ttl=3600)
-def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, format=None):
+def fetch_anilist_list_raw(query, type_, genres, sort_opt, page, country=None, format=None):
+    """Raw AniList fetcher for threading."""
     anilist_sort = "POPULARITY_DESC"
     if sort_opt == "Top Rated": anilist_sort = "SCORE_DESC"
     elif sort_opt == "Relevance" and query: anilist_sort = "SEARCH_MATCH"
@@ -331,9 +330,9 @@ def fetch_anilist_list(query, type_, genres, sort_opt, page, country=None, forma
     return []
 
 @st.cache_data(ttl=3600)
-def fetch_open_library(query, genre=None):
+def fetch_open_library_raw(query, genre=None):
+    """Raw Open Library fetcher for threading."""
     url = "https://openlibrary.org/search.json"
-    
     params = {'limit': 15}
     if query:
         params['q'] = query
@@ -370,7 +369,8 @@ def get_tmdb_trailer(tmdb_id, media_type):
     return None
 
 # --- PROCESSORS ---
-def process_open_library(items, results_list, detected_type):
+def process_open_library(items, detected_type):
+    results = []
     for item in items:
         cover_id = item.get('cover_i')
         img_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else "https://via.placeholder.com/300x450?text=No+Cover"
@@ -386,7 +386,7 @@ def process_open_library(items, results_list, detected_type):
         
         rating_val = item.get('ratings_average', 0)
         
-        results_list.append({
+        results.append({
             "Title": title,
             "Type": detected_type,
             "Country": "International",
@@ -400,8 +400,10 @@ def process_open_library(items, results_list, detected_type):
             "Source": "OpenLibrary",
             "Links": []
         })
+    return results
 
-def process_anilist_results(res_list, results_list, forced_type, selected_genres):
+def process_anilist_results(res_list, forced_type, selected_genres):
+    results = []
     for res in res_list:
         origin = res.get('countryOfOrigin', 'JP')
         final_type = forced_type
@@ -426,7 +428,7 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
         avg_score = res.get('averageScore')
         rating_str = f"{avg_score/10}/10" if avg_score else "?/10"
         
-        results_list.append({
+        results.append({
             "Title": res['title']['english'] if res['title']['english'] else res['title']['romaji'],
             "Type": final_type,
             "Country": origin,
@@ -439,12 +441,60 @@ def process_anilist_results(res_list, results_list, forced_type, selected_genres
             "ID": None,
             "Links": res.get('externalLinks', [])
         })
+    return results
 
-# --- SEARCH ENGINE ---
+def process_tmdb_results_batch(results, media_kind, specific_type, selected_types, selected_genres, query):
+    processed = []
+    for r in results:
+        res_lang = getattr(r, 'original_language', 'en')
+        match = True
+        
+        if not query:
+            if specific_type == "K-Drama" and res_lang != 'ko': match = False
+            elif specific_type == "C-Drama" and res_lang != 'zh': match = False
+            elif specific_type == "Thai Drama" and res_lang != 'th': match = False
+        
+        # Genre Check
+        genre_ids = getattr(r, 'genre_ids', [])
+        res_genres = [ID_TO_GENRE.get(gid, "Unknown") for gid in genre_ids]
+        if selected_genres:
+            if not any(g in res_genres for g in selected_genres): match = False
+
+        if match:
+            origin = getattr(r, 'original_language', 'en')
+            detected_type = "Web Series"
+            if media_kind == "Movie": detected_type = "Movies"
+            elif origin == 'ko': detected_type = "K-Drama"
+            elif origin == 'zh': detected_type = "C-Drama"
+            elif origin == 'th': detected_type = "Thai Drama"
+            elif origin == 'ja': detected_type = "Anime"
+            elif origin == 'en': detected_type = "Web Series"
+            
+            if detected_type not in selected_types: continue
+
+            poster = getattr(r, 'poster_path', None)
+            img_url = f"{tmdb_poster_base}{poster}" if poster else ""
+            
+            processed.append({
+                "Title": getattr(r, 'title', getattr(r, 'name', 'Unknown')),
+                "Type": detected_type,
+                "Country": origin,
+                "Genres": ", ".join(res_genres),
+                "Image": img_url,
+                "Overview": getattr(r, 'overview', 'No overview.'),
+                "Rating": f"{getattr(r, 'vote_average', 0)}/10",
+                "Backdrop": f"{tmdb_backdrop_base}{getattr(r, 'backdrop_path', '')}",
+                "Total_Eps": "?", 
+                "ID": getattr(r, 'id', None)
+            })
+    return processed
+
+# --- PARALLEL SEARCH ENGINE ---
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data = []
+    futures = []
     
-    # 1. VISUAL MEDIA
+    # 1. VISUAL MEDIA (Movies, Shows, Asian Dramas)
     live_action = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]
     if any(t in selected_types for t in live_action):
         g_ids = ""
@@ -459,120 +509,77 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
         discover = Discover()
         search = Search()
         
-        def run_tmdb(media_kind, specific_type, lang_filter=None):
+        # Define TMDB Job
+        def run_tmdb_job(media_kind, specific_type, lang_filter=None):
             try:
                 active_q = query
                 if query and specific_type == "K-Drama": active_q = f"{query} Korean"
                 elif query and specific_type == "C-Drama": active_q = f"{query} Chinese"
                 
                 if active_q:
-                    if media_kind == "Movie": results = search.movies(active_q, page=page)
-                    else: results = search.tv_shows(active_q, page=page)
+                    if media_kind == "Movie": raw = search.movies(active_q, page=page)
+                    else: raw = search.tv_shows(active_q, page=page)
                 else:
                     kwargs = {'sort_by': tmdb_sort, 'page': page, 'vote_count.gte': 5}
                     if g_ids: kwargs['with_genres'] = g_ids
                     if lang_filter: kwargs['with_original_language'] = lang_filter
-                    if media_kind == "Movie": results = discover.discover_movies(kwargs)
-                    else: results = discover.discover_tv_shows(kwargs)
+                    if media_kind == "Movie": raw = discover.discover_movies(kwargs)
+                    else: raw = discover.discover_tv_shows(kwargs)
+                
+                return process_tmdb_results_batch(raw, media_kind, specific_type, selected_types, selected_genres, query)
+            except: return []
 
-                for r in results:
-                    res_lang = getattr(r, 'original_language', 'en')
-                    match = True
-                    if not query:
-                        if specific_type == "K-Drama" and res_lang != 'ko': match = False
-                        elif specific_type == "C-Drama" and res_lang != 'zh': match = False
-                        elif specific_type == "Thai Drama" and res_lang != 'th': match = False
-                    
-                    if match:
-                        process_tmdb_result(r, media_kind, results_data, selected_types, selected_genres)
+    # 2. ANILIST & OPEN LIBRARY JOB DEFINITIONS
+    def run_anilist_job(q, t, g, s, p, c=None, f=None, forced_t="Anime"):
+        raw = fetch_anilist_list_raw(q, t, g, s, p, c, f)
+        return process_anilist_results(raw, forced_t, g)
+
+    def run_openlib_job(q, g, forced_t):
+        q_mod = q
+        if forced_t == "Novel": q_mod = q + " novel" if q else "fantasy novel"
+        raw = fetch_open_library_raw(q_mod, g)
+        return process_open_library(raw, forced_t)
+
+    # EXECUTE IN PARALLEL
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        # TMDB
+        if "Movies" in selected_types: futures.append(executor.submit(run_tmdb_job, "Movie", "Movies"))
+        if "Web Series" in selected_types: futures.append(executor.submit(run_tmdb_job, "TV", "Web Series"))
+        if "K-Drama" in selected_types: futures.append(executor.submit(run_tmdb_job, "TV", "K-Drama", "ko"))
+        if "C-Drama" in selected_types: futures.append(executor.submit(run_tmdb_job, "TV", "C-Drama", "zh"))
+        if "Thai Drama" in selected_types: futures.append(executor.submit(run_tmdb_job, "TV", "Thai Drama", "th"))
+        
+        # ANILIST
+        if "Anime" in selected_types: futures.append(executor.submit(run_anilist_job, query, "ANIME", selected_genres, sort_option, page, None, None, "Anime"))
+        if "Donghua" in selected_types: futures.append(executor.submit(run_anilist_job, query, "ANIME", selected_genres, sort_option, page, "CN", None, "Donghua"))
+        if "Manga" in selected_types: futures.append(executor.submit(run_anilist_job, query, "MANGA", selected_genres, sort_option, page, "JP", None, "Manga"))
+        if "Manhwa" in selected_types: futures.append(executor.submit(run_anilist_job, query, "MANGA", selected_genres, sort_option, page, "KR", None, "Manhwa"))
+        if "Manhua" in selected_types: futures.append(executor.submit(run_anilist_job, query, "MANGA", selected_genres, sort_option, page, "CN", None, "Manhua"))
+        
+        # NOVELS (Mix)
+        if "Novel" in selected_types:
+            futures.append(executor.submit(run_anilist_job, query, "MANGA", selected_genres, sort_option, page, None, "NOVEL", "Novel"))
+            if "Web Novel" in selected_genres:
+                 futures.append(executor.submit(run_anilist_job, query, "MANGA", selected_genres, sort_option, page, "KR", "NOVEL", "Novel"))
+                 futures.append(executor.submit(run_anilist_job, query, "MANGA", selected_genres, sort_option, page, "CN", "NOVEL", "Novel"))
+            futures.append(executor.submit(run_openlib_job, query, None, "Novel"))
+
+        # BOOKS (OpenLib)
+        if "Book" in selected_types:
+            target_genre = None
+            if selected_genres:
+                book_genres = [g for g in selected_genres if g in BOOK_GENRES]
+                if book_genres: target_genre = book_genres[0]
+            futures.append(executor.submit(run_openlib_job, query, target_genre, "Book"))
+
+        # GATHER RESULTS
+        for future in as_completed(futures):
+            try:
+                data = future.result()
+                if data: results_data.extend(data)
             except: pass
 
-        if "Movies" in selected_types: run_tmdb("Movie", "Movies")
-        if "Web Series" in selected_types: run_tmdb("TV", "Web Series")
-        if "K-Drama" in selected_types: run_tmdb("TV", "K-Drama", "ko")
-        if "C-Drama" in selected_types: run_tmdb("TV", "C-Drama", "zh")
-        if "Thai Drama" in selected_types: run_tmdb("TV", "Thai Drama", "th")
-
-    # 2. ANILIST
-    if any(t in selected_types for t in ["Anime", "Donghua", "Novel", "Manga", "Manhwa", "Manhua"]):
-        if "Anime" in selected_types: 
-            r = fetch_anilist_list(query, "ANIME", selected_genres, sort_option, page, country=None)
-            process_anilist_results(r, results_data, "Anime", selected_genres)
-        if "Donghua" in selected_types:
-            r = fetch_anilist_list(query, "ANIME", selected_genres, sort_option, page, country="CN")
-            process_anilist_results(r, results_data, "Donghua", selected_genres)
-        
-        if "Manga" in selected_types:
-            r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="JP")
-            process_anilist_results(r, results_data, "Manga", selected_genres)
-        if "Manhwa" in selected_types:
-            r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="KR")
-            process_anilist_results(r, results_data, "Manhwa", selected_genres)
-        if "Manhua" in selected_types:
-            r = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN")
-            process_anilist_results(r, results_data, "Manhua", selected_genres)
-
-        if "Novel" in selected_types:
-             r1 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, format="NOVEL")
-             process_anilist_results(r1, results_data, "Novel", selected_genres)
-             if "Web Novel" in selected_genres:
-                 r2 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="KR", format="NOVEL")
-                 process_anilist_results(r2, results_data, "Novel", selected_genres)
-                 r3 = fetch_anilist_list(query, "MANGA", selected_genres, sort_option, page, country="CN", format="NOVEL")
-                 process_anilist_results(r3, results_data, "Novel", selected_genres)
-
-    # 3. OPEN LIBRARY
-    if "Book" in selected_types or "Novel" in selected_types:
-        target_genre = None
-        if selected_genres:
-            book_genres = [g for g in selected_genres if g in BOOK_GENRES]
-            if book_genres: target_genre = book_genres[0]
-
-        if "Novel" in selected_types:
-             q_mod = query + " novel" if query else "fantasy novel"
-             items = fetch_open_library(q_mod, genre=target_genre)
-             process_open_library(items, results_data, "Novel")
-             
-        if "Book" in selected_types:
-             items = fetch_open_library(query, genre=target_genre)
-             process_open_library(items, results_data, "Book")
-
     return results_data
-
-def process_tmdb_result(res, media_kind, results_list, selected_types, selected_genres):
-    origin = getattr(res, 'original_language', 'en')
-    detected_type = "Web Series" 
-    
-    if media_kind == "Movie": 
-        detected_type = "Movies"
-    elif origin == 'ko': detected_type = "K-Drama"
-    elif origin == 'zh': detected_type = "C-Drama"
-    elif origin == 'th': detected_type = "Thai Drama"
-    elif origin == 'ja': detected_type = "Anime"
-    elif origin == 'en': detected_type = "Web Series"
-    
-    if detected_type not in selected_types: return
-    
-    genre_ids = getattr(res, 'genre_ids', [])
-    res_genres = [ID_TO_GENRE.get(gid, "Unknown") for gid in genre_ids]
-    if selected_genres:
-        if not any(g in res_genres for g in selected_genres): return
-
-    poster = getattr(res, 'poster_path', None)
-    img_url = f"{tmdb_poster_base}{poster}" if poster else ""
-    
-    results_list.append({
-        "Title": getattr(res, 'title', getattr(res, 'name', 'Unknown')),
-        "Type": detected_type,
-        "Country": origin,
-        "Genres": ", ".join(res_genres),
-        "Image": img_url,
-        "Overview": getattr(res, 'overview', 'No overview.'),
-        "Rating": f"{getattr(res, 'vote_average', 0)}/10",
-        "Backdrop": f"{tmdb_backdrop_base}{getattr(res, 'backdrop_path', '')}",
-        "Total_Eps": "?", 
-        "ID": getattr(res, 'id', None)
-    })
 
 # --- UI START ---
 if "refresh_key" not in st.session_state: st.session_state.refresh_key = 0
@@ -588,7 +595,6 @@ if tab == "Search & Add":
     # 1. SEARCH INPUT (Enter triggers search)
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1: 
-        # Standard text_input searches on Enter by default
         search_query = st.text_input("Title (Optional)", on_change=None) 
     with c2: 
         all_types = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel", "Book"]
@@ -601,9 +607,7 @@ if tab == "Search & Add":
     with c3: selected_genres = st.multiselect("Genre", current_genres)
     with c4: sort_option = st.selectbox("Sort By", ["Popularity", "Relevance", "Top Rated"])
     
-    # Button is still here for explicit clicks, but Enter works on the input above
     if st.button("🚀 Search / Discover") or search_query:
-        # Only search if triggered
         if search_query or st.session_state.get('search_trigger', False) or selected_types:
             st.session_state.search_page = 1
             st.session_state.search_results = []
@@ -711,4 +715,176 @@ elif tab == "My Gallery":
             for row in raw_data[1:]:
                 if not row or not row[0].strip(): continue
                 if len(row) < len(HEADERS): row += [""] * (len(HEADERS) - len(row))
-                safe_rows.append(row[:len(HEADERS
+                safe_rows.append(row[:len(HEADERS)])
+            
+            df = pd.DataFrame(safe_rows, columns=HEADERS)
+            
+            with st.expander("Filter Collection", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                with c1: filter_text = st.text_input("Search Title")
+                with c2: filter_type = st.multiselect("Filter Type", df['Type'].unique())
+                with c3: filter_status = st.multiselect("Status", ["Plan to Watch", "Plan to Read", "Watching", "Reading", "Completed", "Dropped"])
+            
+            if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
+            if filter_type: df = df[df['Type'].isin(filter_type)]
+            if filter_status: df = df[df['Status'].isin(filter_status)]
+
+            st.divider()
+
+            # SINGLE GRID VIEW
+            if HAS_SORTABLES and not df.empty:
+                with st.expander("🔄 Reorder List", expanded=False):
+                    st.caption("Drag items to change order, then click Save.")
+                    subset_titles = df['Title'].tolist()
+                    sorted_titles = sort_items(subset_titles, key="sort_all")
+                    if sorted_titles != subset_titles:
+                        if st.button("💾 Save Order"):
+                            original_indices = df.index.tolist()
+                            title_map = {}
+                            for idx in original_indices:
+                                title_val = df.loc[idx, 'Title']
+                                if title_val not in title_map: title_map[title_val] = []
+                                title_map[title_val].append(idx)
+                            new_order_indices = []
+                            for title in sorted_titles:
+                                if title in title_map and title_map[title]:
+                                    new_order_indices.append(title_map[title].pop(0))
+                            new_df = df.iloc[new_order_indices].reset_index(drop=True)
+                            bulk_update_order(new_df)
+
+            if not df.empty:
+                cols_per_row = 5
+                rows = [df.iloc[i:i + cols_per_row] for i in range(0, len(df), cols_per_row)]
+                
+                for row_chunk in rows:
+                    cols = st.columns(cols_per_row)
+                    for col, (index, item) in zip(cols, row_chunk.iterrows()):
+                        with col:
+                            img = item.get('Image', '')
+                            if not img.startswith("http"): img = "https://via.placeholder.com/300x450?text=No+Image"
+                            st.image(img, use_container_width=True)
+                            
+                            st.markdown(f"**{item['Title']}**")
+                            unique_key = f"gal_{index}"
+                            
+                            with st.popover("📜 Overview"):
+                                # --- 1. MEDIA DETAILS ---
+                                tmdb_id = item.get('ID')
+                                m_type = 'movie' if item['Type'] == "Movies" else 'tv'
+                                if not tmdb_id and item['Type'] in ["Movies", "Web Series", "K-Drama"]: 
+                                    tmdb_id = recover_tmdb_id(item['Title'], m_type)
+
+                                # --- 2. TRAILER LOGIC ---
+                                trailer_url = None
+                                if item['Type'] in ["Anime", "Donghua"]:
+                                     ad = fetch_anilist_data_single(item['Title'], "ANIME")
+                                     if ad and 'trailer' in ad and ad['trailer'] and ad['trailer']['site'] == 'youtube':
+                                         trailer_url = f"https://www.youtube.com/watch?v={ad['trailer']['id']}"
+                                elif item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]:
+                                     trailer_url = get_tmdb_trailer(tmdb_id, m_type)
+
+                                if trailer_url:
+                                    st.caption("🎬 Trailer")
+                                    st.video(trailer_url)
+
+                                st.write(f"**Status:** {item['Status']}")
+                                st.write(f"**Rating:** {item['Rating']}")
+                                st.caption(item['Overview'])
+                                st.divider()
+                                
+                                # --- 4. LINKS / STREAMS ---
+                                is_book = item['Type'] in ["Book", "Novel"]
+                                is_comic = item['Type'] in ["Manga", "Manhwa", "Manhua"]
+                                
+                                if is_book:
+                                    st.caption("📖 Reading Options")
+                                    st.link_button("📘 Read on Google Books", f"https://www.google.com/search?tbm=bks&q={item['Title']}")
+                                elif is_comic:
+                                    st.caption("📖 Reading Options")
+                                    st.link_button("📖 Read on Comix.to", f"https://www.google.com/search?q=site:comix.to+{item['Title']}")
+                                    live_data = fetch_anilist_data_single(item['Title'], "MANGA")
+                                    if live_data and live_data.get('externalLinks'):
+                                        st.write("**Official Sources:**")
+                                        for l in live_data['externalLinks']:
+                                            st.link_button(f"🔗 {l['site']}", l['url'])
+                                else:
+                                    st.caption(f"📺 Watch in {stream_country}")
+                                    if item['Type'] == "Anime":
+                                        st.link_button("🟠 Search Crunchyroll", f"https://www.crunchyroll.com/search?q={item['Title']}")
+                                    elif item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
+                                        st.link_button("💙 Watch on Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
+                                    
+                                    provs = get_streaming_info(tmdb_id, m_type, country_code)
+                                    has_streams = False
+                                    if provs:
+                                        if 'flatrate' in provs:
+                                            st.write("**Streaming:**")
+                                            for p in provs['flatrate']:
+                                                lnk = get_provider_link(p['provider_name'], item['Title'])
+                                                st.markdown(f"- [{p['provider_name']}]({lnk})")
+                                            has_streams = True
+                                        if 'rent' in provs:
+                                            st.write("**Rent:**")
+                                            for p in provs['rent']:
+                                                lnk = get_provider_link(p['provider_name'], item['Title'])
+                                                st.markdown(f"- [{p['provider_name']}]({lnk})")
+                                            has_streams = True
+                                        if 'buy' in provs:
+                                            st.write("**Buy:**")
+                                            for p in provs['buy']:
+                                                lnk = get_provider_link(p['provider_name'], item['Title'])
+                                                st.markdown(f"- [{p['provider_name']}]({lnk})")
+                                            has_streams = True
+                                    if not has_streams: st.caption("No official streams found.")
+
+                            # --- 5. MANAGEMENT ---
+                            with st.expander("⚙️ Manage"):
+                                is_read = is_book or is_comic
+                                opts = ["Plan to Read", "Reading", "Completed", "Dropped"] if is_read else ["Plan to Watch", "Watching", "Completed", "Dropped"]
+                                curr = item.get('Status', opts[0])
+                                if curr not in opts: curr = opts[0]
+                                new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
+                                
+                                if is_book or item['Type'] == "Novel":
+                                    col_s, col_e = st.columns(2)
+                                    try: c_pg = int(item.get('Current_Season', 0)) 
+                                    except: c_pg = 0
+                                    with col_s: st.caption("Pages/Chs")
+                                    with col_e: new_sea = st.number_input("Count", value=c_pg, key=f"s_{unique_key}")
+                                    new_ep = 0
+                                    st.caption(f"Total: {item.get('Total_Eps', '?')}")
+                                
+                                elif item['Type'] != "Movies":
+                                    try: c_sea = int(item.get('Current_Season', 1))
+                                    except: c_sea = 1
+                                    try: c_ep = int(item.get('Current_Ep', 0))
+                                    except: c_ep = 0
+                                    
+                                    if is_comic: sea_lbl, ep_lbl = "Vol.", "Ch."
+                                    else: sea_lbl, ep_lbl = "S", "E"
+
+                                    total_str = item.get('Total_Eps', '?')
+                                    if not is_comic and tmdb_id:
+                                         si = get_season_details(tmdb_id, c_sea)
+                                         if si: total_str = si['episode_count']
+                                    
+                                    col_s, col_e = st.columns(2)
+                                    with col_s: new_sea = st.number_input(sea_lbl, min_value=1, value=c_sea, key=f"s_{unique_key}")
+                                    with col_e: 
+                                        lbl = f"{ep_lbl} ({total_str})" if total_str != "?" else ep_lbl
+                                        new_ep = st.number_input(lbl, min_value=0, value=c_ep, key=f"e_{unique_key}")
+                                else: new_sea, new_ep = 1, 0
+
+                                c_sv, c_dl = st.columns(2)
+                                with c_sv: 
+                                    if st.button("Save", key=f"sv_{unique_key}"):
+                                        update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
+                                        st.rerun()
+                                with c_dl:
+                                    if st.button("Del", key=f"dl_{unique_key}"):
+                                        delete_from_sheet(item['Title'])
+                                        st.rerun()
+            else:
+                st.info("No items found matching filters.")
+    else:
+        st.error("Connection Failed. Check Secrets.")
