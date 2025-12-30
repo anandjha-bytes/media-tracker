@@ -100,40 +100,49 @@ def get_google_sheet():
     except:
         return None
 
-# --- LIBRARY CACHE (For "Added" Check) ---
-def get_library_map():
-    sheet = get_google_sheet()
-    lib_map = {}
-    if sheet:
-        try:
-            records = sheet.get_all_records()
-            for row in records:
-                t = row.get('Title', '').strip()
-                if t:
-                    lib_map[t] = {
-                        'Status': row.get('Status'),
-                        'Current_Season': row.get('Current_Season'),
-                        'Current_Ep': row.get('Current_Ep')
-                    }
-        except: pass
-    return lib_map
+# --- FAST LIBRARY CACHE ---
+def get_library_data():
+    """Reads sheet once and caches it for speed."""
+    if 'lib_data' not in st.session_state:
+        sheet = get_google_sheet()
+        if sheet:
+            try:
+                # Get all records at once (faster than repeated calls)
+                data = sheet.get_all_records()
+                # Create a lookup dict: Title -> Row Data
+                lib_map = {}
+                for item in data:
+                    t = item.get('Title', '').strip()
+                    if t: lib_map[t] = item
+                st.session_state.lib_data = lib_map
+            except:
+                st.session_state.lib_data = {}
+        else:
+            st.session_state.lib_data = {}
+    return st.session_state.lib_data
+
+def refresh_library():
+    """Forces a re-fetch of the library."""
+    if 'lib_data' in st.session_state:
+        del st.session_state.lib_data
+    get_library_data()
 
 # --- DATABASE ACTIONS ---
 def fetch_details_and_add(item):
     sheet = get_google_sheet()
     if not sheet: return False
     
-    try:
-        existing_titles = sheet.col_values(1)
-        if item['Title'] in existing_titles:
-            st.toast(f"⚠️ '{item['Title']}' is already in your library!")
-            return True
-    except: pass
+    # 1. Check Cache first (Instant check)
+    lib_data = get_library_data()
+    if item['Title'].strip() in lib_data:
+        st.toast(f"⚠️ '{item['Title']}' is already in your library!")
+        return True
 
     total_seasons = 1
     total_eps = item['Total_Eps']
     media_id = item.get('ID') 
     
+    # Fetch details only if needed
     if item['Type'] in ["Web Series", "K-Drama", "C-Drama", "Thai Drama"] and media_id:
         try:
             tv_api = TV()
@@ -155,6 +164,17 @@ def fetch_details_and_add(item):
         ]
         sheet.append_row(row_data)
         st.toast(f"✅ Added: {item['Title']}")
+        
+        # Update Cache Locally (Instant UI update)
+        new_entry = {
+            "Title": item['Title'], "Type": item['Type'], "Country": item['Country'],
+            "Status": default_status, "Genres": item['Genres'], "Image": item['Image'],
+            "Overview": item['Overview'], "Rating": item['Rating'], "Backdrop": item['Backdrop'],
+            "Current_Season": 1, "Current_Ep": 0, "Total_Eps": total_eps, "Total_Seasons": total_seasons, "ID": media_id
+        }
+        if 'lib_data' in st.session_state:
+            st.session_state.lib_data[item['Title'].strip()] = new_entry
+            
         return True
     except Exception as e:
         st.error(f"Error: {e}")
@@ -170,6 +190,11 @@ def update_status_in_sheet(title, new_status, new_season, new_ep):
                 sheet.update_cell(cell.row, 10, new_season)
                 sheet.update_cell(cell.row, 11, new_ep)
                 st.toast(f"✅ Saved: {title}")
+                # Update Cache
+                if 'lib_data' in st.session_state and title in st.session_state.lib_data:
+                    st.session_state.lib_data[title]['Status'] = new_status
+                    st.session_state.lib_data[title]['Current_Season'] = new_season
+                    st.session_state.lib_data[title]['Current_Ep'] = new_ep
                 time.sleep(0.5)
         except: pass
 
@@ -181,6 +206,9 @@ def delete_from_sheet(title):
             if cell:
                 sheet.delete_rows(cell.row)
                 st.toast(f"🗑️ Deleted: {title}")
+                # Update Cache
+                if 'lib_data' in st.session_state and title in st.session_state.lib_data:
+                    del st.session_state.lib_data[title]
                 time.sleep(0.5)
         except: pass
 
@@ -193,6 +221,7 @@ def bulk_update_order(new_df):
     sheet.append_row(header)
     sheet.append_rows(data_to_upload)
     st.toast("✅ Order Saved!")
+    refresh_library()
     time.sleep(1)
     st.rerun()
 
@@ -556,34 +585,36 @@ tab = st.sidebar.radio("Menu", ["My Gallery", "Search & Add"], key="main_nav")
 if tab == "Search & Add":
     st.subheader("Global Database Search")
     
-    # 1. SEARCH FORM
-    with st.form(key="search_form"):
-        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-        with c1: search_query = st.text_input("Title (Optional)")
-        with c2: 
-            all_types = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel", "Book"]
-            selected_types = st.multiselect("Type", all_types, default=["Movies"])
-        
-        current_genres = list(TMDB_GENRE_MAP.keys())
-        if "Book" in selected_types or "Novel" in selected_types:
-             current_genres = sorted(list(set(current_genres + BOOK_GENRES)))
+    # 1. SEARCH INPUT (Enter triggers search)
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    with c1: 
+        # Standard text_input searches on Enter by default
+        search_query = st.text_input("Title (Optional)", on_change=None) 
+    with c2: 
+        all_types = ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel", "Book"]
+        selected_types = st.multiselect("Type", all_types, default=["Movies"])
+    
+    current_genres = list(TMDB_GENRE_MAP.keys())
+    if "Book" in selected_types or "Novel" in selected_types:
+            current_genres = sorted(list(set(current_genres + BOOK_GENRES)))
 
-        with c3: selected_genres = st.multiselect("Genre", current_genres)
-        with c4: sort_option = st.selectbox("Sort By", ["Popularity", "Relevance", "Top Rated"])
-        
-        submitted = st.form_submit_button("🚀 Search / Discover")
-
-    if submitted:
-        st.session_state.search_page = 1
-        st.session_state.search_results = []
-        with st.spinner("Fetching..."):
-            if not selected_types: selected_types = ["Movies"]
-            results = search_unified(search_query, selected_types, selected_genres, sort_option, page=1)
-            st.session_state.search_results = results
-        if not st.session_state.search_results: st.warning("No results found.")
+    with c3: selected_genres = st.multiselect("Genre", current_genres)
+    with c4: sort_option = st.selectbox("Sort By", ["Popularity", "Relevance", "Top Rated"])
+    
+    # Button is still here for explicit clicks, but Enter works on the input above
+    if st.button("🚀 Search / Discover") or search_query:
+        # Only search if triggered
+        if search_query or st.session_state.get('search_trigger', False) or selected_types:
+            st.session_state.search_page = 1
+            st.session_state.search_results = []
+            with st.spinner("Fetching..."):
+                if not selected_types: selected_types = ["Movies"]
+                results = search_unified(search_query, selected_types, selected_genres, sort_option, page=1)
+                st.session_state.search_results = results
+            if not st.session_state.search_results: st.warning("No results found.")
 
     if st.session_state.search_results:
-        lib_map = get_library_map()
+        lib_map = get_library_data() # Use Fast Cache
         
         for idx, item in enumerate(st.session_state.search_results):
             with st.container():
@@ -603,10 +634,10 @@ if tab == "Search & Add":
                                 st.link_button(f"🔗 {link['site']}", link['url'])
 
                     # "ADDED" LOGIC & DIRECT MANAGE
-                    is_added = item['Title'] in lib_map
+                    is_added = item['Title'].strip() in lib_map
                     
                     if is_added:
-                        existing_data = lib_map[item['Title']]
+                        existing_data = lib_map[item['Title'].strip()]
                         st.success("✅ In Collection")
                         
                         with st.expander("Update Status", expanded=False):
@@ -669,6 +700,9 @@ elif tab == "My Gallery":
     sheet = get_google_sheet()
     
     if sheet:
+        # Load Cache to ensure sync
+        get_library_data()
+        
         raw_data = sheet.get_all_values()
         HEADERS = ["Title", "Type", "Country", "Status", "Genres", "Image", "Overview", "Rating", "Backdrop", "Current_Season", "Current_Ep", "Total_Eps", "Total_Seasons", "ID"]
         
@@ -677,205 +711,4 @@ elif tab == "My Gallery":
             for row in raw_data[1:]:
                 if not row or not row[0].strip(): continue
                 if len(row) < len(HEADERS): row += [""] * (len(HEADERS) - len(row))
-                safe_rows.append(row[:len(HEADERS)])
-            
-            df = pd.DataFrame(safe_rows, columns=HEADERS)
-            
-            with st.expander("Filter Collection", expanded=False):
-                c1, c2, c3 = st.columns(3)
-                with c1: filter_text = st.text_input("Search Title")
-                with c2: filter_type = st.multiselect("Filter Type", df['Type'].unique())
-                with c3: filter_status = st.multiselect("Status", ["Plan to Watch", "Plan to Read", "Watching", "Reading", "Completed", "Dropped"])
-            
-            if filter_text: df = df[df['Title'].astype(str).str.contains(filter_text, case=False, na=False)]
-            if filter_type: df = df[df['Type'].isin(filter_type)]
-            if filter_status: df = df[df['Status'].isin(filter_status)]
-
-            st.divider()
-
-            unique_types = sorted(df['Type'].unique().tolist())
-            
-            if unique_types:
-                tabs = st.tabs(unique_types)
-                for t, category in zip(tabs, unique_types):
-                    with t:
-                        subset = df[df['Type'] == category]
-                        
-                        if HAS_SORTABLES and not subset.empty:
-                            with st.expander(f"🔄 Reorder {category}", expanded=False):
-                                st.caption("Drag items to change order, then click Save.")
-                                subset_titles = subset['Title'].tolist()
-                                sorted_titles = sort_items(subset_titles, key=f"sort_{category}")
-                                if sorted_titles != subset_titles:
-                                    if st.button(f"💾 Save {category} Order"):
-                                        original_indices = subset.index.tolist()
-                                        title_map = {}
-                                        for idx in original_indices:
-                                            title_val = df.loc[idx, 'Title']
-                                            if title_val not in title_map: title_map[title_val] = []
-                                            title_map[title_val].append(idx)
-                                        new_order_indices = []
-                                        for title in sorted_titles:
-                                            if title in title_map and title_map[title]:
-                                                new_order_indices.append(title_map[title].pop(0))
-                                        final_global_indices = df.index.tolist()
-                                        slots_to_fill = sorted(original_indices)
-                                        for slot, new_idx in zip(slots_to_fill, new_order_indices):
-                                            final_global_indices[slot] = new_idx
-                                        new_df = df.iloc[final_global_indices].reset_index(drop=True)
-                                        bulk_update_order(new_df)
-
-                        if not subset.empty:
-                            cols_per_row = 5
-                            rows = [subset.iloc[i:i + cols_per_row] for i in range(0, len(subset), cols_per_row)]
-                            
-                            for row_chunk in rows:
-                                cols = st.columns(cols_per_row)
-                                for col, (index, item) in zip(cols, row_chunk.iterrows()):
-                                    with col:
-                                        img = item.get('Image', '')
-                                        if not img.startswith("http"): img = "https://via.placeholder.com/200x300?text=No+Image"
-                                        st.image(img, use_container_width=True)
-                                        
-                                        st.markdown(f"**{item['Title']}**")
-                                        unique_key = f"{category}_{index}"
-                                        
-                                        with st.popover("📜 Overview"):
-                                            # --- 1. MEDIA DETAILS ---
-                                            tmdb_id = item.get('ID')
-                                            # Recover ID if missing
-                                            m_type = 'movie' if item['Type'] == "Movies" else 'tv'
-                                            if not tmdb_id and item['Type'] in ["Movies", "Web Series", "K-Drama"]: 
-                                                tmdb_id = recover_tmdb_id(item['Title'], m_type)
-
-                                            # --- 2. TRAILER LOGIC ---
-                                            trailer_url = None
-                                            # Anime/Donghua -> AniList
-                                            if item['Type'] in ["Anime", "Donghua"]:
-                                                 ad = fetch_anilist_data_single(item['Title'], "ANIME")
-                                                 if ad and 'trailer' in ad and ad['trailer'] and ad['trailer']['site'] == 'youtube':
-                                                     trailer_url = f"https://www.youtube.com/watch?v={ad['trailer']['id']}"
-                                            # Live Action -> TMDB
-                                            elif item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]:
-                                                 trailer_url = get_tmdb_trailer(tmdb_id, m_type)
-
-                                            if trailer_url:
-                                                st.caption("🎬 Trailer")
-                                                st.video(trailer_url)
-
-                                            # --- 3. BASIC INFO ---
-                                            st.write(f"**Status:** {item['Status']}")
-                                            st.write(f"**Rating:** {item['Rating']}")
-                                            st.caption(item['Overview'])
-                                            st.divider()
-                                            
-                                            # --- 4. LINKS / STREAMS ---
-                                            is_book = item['Type'] in ["Book", "Novel"]
-                                            is_comic = item['Type'] in ["Manga", "Manhwa", "Manhua"]
-                                            
-                                            # A. READING OPTIONS
-                                            if is_book:
-                                                st.caption("📖 Reading Options")
-                                                st.link_button("📘 Read on Google Books", f"https://www.google.com/search?tbm=bks&q={item['Title']}")
-                                                st.link_button("🛒 Search Amazon", f"https://www.amazon.com/s?k={item['Title']}&i=stripbooks")
-                                            elif is_comic:
-                                                st.caption("📖 Reading Options")
-                                                st.link_button("📖 Read on Comix.to", f"https://www.google.com/search?q=site:comix.to+{item['Title']}")
-                                                
-                                                # OFFICIAL SOURCES (AniList Fetch)
-                                                live_data = fetch_anilist_data_single(item['Title'], "MANGA")
-                                                if live_data and live_data.get('externalLinks'):
-                                                    st.write("**Official Sources:**")
-                                                    for l in live_data['externalLinks']:
-                                                        st.link_button(f"🔗 {l['site']}", l['url'])
-                                            
-                                            # B. WATCHING OPTIONS
-                                            else:
-                                                st.caption(f"📺 Watch in {stream_country}")
-                                                if item['Type'] == "Anime":
-                                                    st.link_button("🟠 Search Crunchyroll", f"https://www.crunchyroll.com/search?q={item['Title']}")
-                                                elif item['Type'] in ["K-Drama", "C-Drama", "Thai Drama"]:
-                                                    st.link_button("💙 Watch on Viki", f"https://www.viki.com/search?q={urllib.parse.quote(item['Title'])}")
-                                                
-                                                provs = get_streaming_info(tmdb_id, m_type, country_code)
-                                                has_streams = False
-                                                if provs:
-                                                    if 'flatrate' in provs:
-                                                        st.write("**Streaming:**")
-                                                        for p in provs['flatrate']:
-                                                            lnk = get_provider_link(p['provider_name'], item['Title'])
-                                                            st.markdown(f"- [{p['provider_name']}]({lnk})")
-                                                        has_streams = True
-                                                    if 'rent' in provs:
-                                                        st.write("**Rent:**")
-                                                        for p in provs['rent']:
-                                                            lnk = get_provider_link(p['provider_name'], item['Title'])
-                                                            st.markdown(f"- [{p['provider_name']}]({lnk})")
-                                                        has_streams = True
-                                                    if 'buy' in provs:
-                                                        st.write("**Buy:**")
-                                                        for p in provs['buy']:
-                                                            lnk = get_provider_link(p['provider_name'], item['Title'])
-                                                            st.markdown(f"- [{p['provider_name']}]({lnk})")
-                                                        has_streams = True
-                                                if not has_streams: st.caption("No official streams found.")
-
-                                        # --- 5. MANAGEMENT ---
-                                        with st.expander("⚙️ Manage"):
-                                            is_read = is_book or is_comic
-                                            opts = ["Plan to Read", "Reading", "Completed", "Dropped"] if is_read else ["Plan to Watch", "Watching", "Completed", "Dropped"]
-                                            curr = item.get('Status', opts[0])
-                                            if curr not in opts: curr = opts[0]
-                                            new_s = st.selectbox("Status", opts, key=f"st_{unique_key}", index=opts.index(curr))
-                                            
-                                            # Unit Logic
-                                            if is_book or item['Type'] == "Novel":
-                                                # Books: Page / Chapter
-                                                col_s, col_e = st.columns(2)
-                                                try: c_pg = int(item.get('Current_Season', 0)) # Using Col 10 for 'Current Page/Ch'
-                                                except: c_pg = 0
-                                                with col_s: st.caption("Pages/Chs")
-                                                with col_e: new_sea = st.number_input("Count", value=c_pg, key=f"s_{unique_key}")
-                                                new_ep = 0 # Unused for books
-                                                st.caption(f"Total: {item.get('Total_Eps', '?')}")
-                                            
-                                            elif item['Type'] != "Movies":
-                                                # TV / Comics
-                                                try: c_sea = int(item.get('Current_Season', 1))
-                                                except: c_sea = 1
-                                                try: c_ep = int(item.get('Current_Ep', 0))
-                                                except: c_ep = 0
-                                                
-                                                if is_comic: sea_lbl, ep_lbl = "Vol.", "Ch."
-                                                else: sea_lbl, ep_lbl = "S", "E"
-
-                                                # Dynamic Totals
-                                                total_str = item.get('Total_Eps', '?')
-                                                if not is_comic and tmdb_id:
-                                                     si = get_season_details(tmdb_id, c_sea)
-                                                     if si: total_str = si['episode_count']
-                                                
-                                                col_s, col_e = st.columns(2)
-                                                with col_s: new_sea = st.number_input(sea_lbl, min_value=1, value=c_sea, key=f"s_{unique_key}")
-                                                with col_e: 
-                                                    lbl = f"{ep_lbl} ({total_str})" if total_str != "?" else ep_lbl
-                                                    new_ep = st.number_input(lbl, min_value=0, value=c_ep, key=f"e_{unique_key}")
-                                            else: new_sea, new_ep = 1, 0
-
-                                            c_sv, c_dl = st.columns(2)
-                                            with c_sv: 
-                                                if st.button("Save", key=f"sv_{unique_key}"):
-                                                    update_status_in_sheet(item['Title'], new_s, new_sea, new_ep)
-                                                    st.rerun()
-                                            with c_dl:
-                                                if st.button("Del", key=f"dl_{unique_key}"):
-                                                    delete_from_sheet(item['Title'])
-                                                    st.rerun()
-                        else:
-                            st.info(f"No {category} items found.")
-            else:
-                st.info("Library Empty.")
-        else:
-            st.info("Library Empty.")
-    else:
-        st.error("Connection Failed. Check Secrets.")
+                safe_rows.append(row[:len(HEADERS
