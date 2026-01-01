@@ -1,4 +1,6 @@
 streamlit
 pandas
+gspread
+oauth2client
+tmdbv3api
 requests
-st-gsheets-connection
