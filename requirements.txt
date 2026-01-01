@@ -1,7 +1,4 @@
 streamlit
 pandas
-gspread
-oauth2client
-tmdbv3api
 requests
-streamlit-sortables
+st-gsheets-connection
