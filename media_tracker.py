@@ -359,9 +359,11 @@ def get_tmdb_trailer(tmdb_id, media_type):
         r = requests.get(url)
         data = r.json()
         if 'results' in data:
+            # 1. Try to find an official Trailer first
             for vid in data['results']:
                 if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
+            # 2. Fallback to any YouTube video
             for vid in data['results']:
                 if vid['site'] == 'YouTube':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
@@ -779,7 +781,7 @@ elif tab == "My Gallery":
                                 if item['Type'] in ["Anime", "Donghua"]:
                                      ad = fetch_anilist_data_single(item['Title'], "ANIME")
                                      if ad and 'trailer' in ad and ad['trailer'] and ad['trailer']['site'] == 'youtube':
-                                         trailer_url = f"https://www.youtube.com/watch?v={ad['trailer']['id']}"
+                                          trailer_url = f"https://www.youtube.com/watch?v={ad['trailer']['id']}"
                                 elif item['Type'] in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama"]:
                                      trailer_url = get_tmdb_trailer(tmdb_id, m_type)
 
