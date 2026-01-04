@@ -20,6 +20,12 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- HANDLE QUERY PARAMS (For Link-Based Navigation) ---
+# This allows the "Sequel" links to trigger a search
+if "search" in st.query_params:
+    st.session_state.search_query_trigger = st.query_params["search"]
+    st.query_params.clear()
+
 st.title("🎬 Ultimate Media Tracker")
 
 # --- IMPORT SORTABLES ---
@@ -263,7 +269,7 @@ def get_provider_link(provider_name, title):
 
 # --- RELATIONS / SEQUEL FETCHERS ---
 @st.cache_data(ttl=3600)
-def get_tmdb_relations(tmdb_id, media_type):
+def get_tmdb_relations(tmdb_id, media_type, current_title):
     """Fetches Sequels, Prequels, or Movie Collections from TMDB."""
     if not tmdb_id: return []
     relations = []
@@ -287,7 +293,18 @@ def get_tmdb_relations(tmdb_id, media_type):
                         if p['id'] != clean_id:
                             relations.append({"title": p['title'], "type": "Movie", "relation": "Part of Series"})
         
-        # REMOVED TV RECOMMENDATIONS (Often just similar shows, not direct sequels)
+        elif media_type == 'tv':
+            # TV Logic: Check for direct "Recommendations" that share the name (likely sequels)
+            url = f"https://api.themoviedb.org/3/tv/{clean_id}/recommendations?api_key={TMDB_API_KEY}&language=en-US&page=1"
+            r = requests.get(url)
+            if r.status_code == 200:
+                recs = r.json().get('results', [])[:6]
+                base_title = current_title.split(':')[0].split('Season')[0].strip().lower()
+                for rec in recs:
+                    rec_name = rec['name']
+                    # Smart Filter: If title is very similar OR contains "Season 2", etc.
+                    if base_title in rec_name.lower() or "Season" in rec_name:
+                         relations.append({"title": rec_name, "type": "TV", "relation": "Sequel/Related"})
         
     except: pass
     return relations
@@ -413,12 +430,16 @@ def get_tmdb_trailer(tmdb_id, media_type):
         url = f"https://api.themoviedb.org/3/{media_type}/{clean_id}/videos?api_key={TMDB_API_KEY}"
         r = requests.get(url)
         data = r.json()
-        if 'results' in data:
-            # 1. Try to find an official Trailer first
+        if 'results' in data and data['results']:
+            # 1. Look for official Trailer
             for vid in data['results']:
                 if vid['site'] == 'YouTube' and vid['type'] == 'Trailer':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
-            # 2. Fallback to any YouTube video
+            # 2. Fallback: Teasers
+            for vid in data['results']:
+                if vid['site'] == 'YouTube' and vid['type'] == 'Teaser':
+                    return f"https://www.youtube.com/watch?v={vid['key']}"
+            # 3. Fallback: Any YouTube video
             for vid in data['results']:
                 if vid['site'] == 'YouTube':
                     return f"https://www.youtube.com/watch?v={vid['key']}"
@@ -702,37 +723,32 @@ if tab == "Search & Add":
                     with st.popover("📜 Overview"):
                         st.write(item['Overview'])
                         
-                        # --- NEW COMPACT RELATIONS (Search Tab) ---
+                        # --- NEW RELATIONS (Search Tab) ---
                         found_relations = []
                         if item['Type'] in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
                             ad = fetch_anilist_data_single(item['Title'], "ANIME" if item['Type'] in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
                             if ad and 'relations' in ad:
                                 for edge in ad['relations']['edges']:
-                                    # STRICT FILTER: Only allow Sequel/Prequel
                                     rtype_raw = edge['relationType']
-                                    if rtype_raw not in ["SEQUEL", "PREQUEL"]: continue 
+                                    # Relaxed filter for AniList
+                                    if rtype_raw not in ["SEQUEL", "PREQUEL", "PARENT", "SIDE_STORY", "ALTERNATIVE"]: continue
                                     
                                     rtype = rtype_raw.replace("_", " ").title()
                                     rtitle = edge['node']['title']['english'] or edge['node']['title']['romaji']
                                     if rtitle: found_relations.append({"type": rtype, "title": rtitle})
                         elif item.get('ID'):
                             m_type = 'movie' if item['Type'] == "Movies" else 'tv'
-                            tmdb_rels = get_tmdb_relations(item['ID'], m_type)
+                            tmdb_rels = get_tmdb_relations(item['ID'], m_type, item['Title'])
                             found_relations.extend(tmdb_rels)
                         
                         if found_relations:
-                            st.markdown("---")
-                            st.caption("🔗 **Watch Order (Sequel/Prequel):**")
-                            # Compact Grid of Buttons
-                            r_cols = st.columns(2)
-                            for i, rel in enumerate(found_relations):
-                                with r_cols[i % 2]:
-                                    label = f"↪ {rel['title']}"
-                                    if len(label) > 28: label = label[:26] + ".."
-                                    if st.button(label, key=f"rel_srch_{idx}_{i}", help=f"{rel.get('type','Rel')}: {rel['title']}"):
-                                        st.session_state.search_query_trigger = rel['title']
-                                        st.rerun()
-                            st.markdown("---")
+                            st.write("")
+                            st.caption("🔗 **Watch Order:**")
+                            # --- LINK STYLE DISPLAY ---
+                            for rel in found_relations:
+                                url = f"/?search={urllib.parse.quote(rel['title'])}"
+                                st.markdown(f"• [{rel['type']}: {rel['title']}]({url})")
+                            st.write("")
 
                         if item['Type'] in ["Manga", "Manhwa", "Manhua", "Novel"] and item.get('Links'):
                             st.write("**Official Sources:**")
@@ -876,40 +892,32 @@ elif tab == "My Gallery":
                                 if not tmdb_id and item['Type'] in ["Movies", "Web Series", "K-Drama"]: 
                                     tmdb_id = recover_tmdb_id(item['Title'], m_type)
 
-                                # --- 2. NEW COMPACT RELATIONS (Gallery Tab) ---
+                                # --- 2. RELATIONS (Gallery Tab) ---
                                 found_relations = []
                                 # Anime/Donghua (AniList)
                                 if item['Type'] in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
                                     ad = fetch_anilist_data_single(item['Title'], "ANIME" if item['Type'] in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
                                     if ad and 'relations' in ad:
                                         for edge in ad['relations']['edges']:
-                                            # STRICT FILTER: Only allow Sequel/Prequel
                                             rtype_raw = edge['relationType']
-                                            if rtype_raw not in ["SEQUEL", "PREQUEL"]: continue
+                                            # Relaxed filter
+                                            if rtype_raw not in ["SEQUEL", "PREQUEL", "PARENT", "SIDE_STORY", "ALTERNATIVE"]: continue
 
                                             rtype = rtype_raw.replace("_", " ").title()
                                             rtitle = edge['node']['title']['english'] or edge['node']['title']['romaji']
                                             if rtitle: found_relations.append({"type": rtype, "title": rtitle})
                                 # TMDB
                                 elif tmdb_id:
-                                    tmdb_rels = get_tmdb_relations(tmdb_id, m_type)
+                                    tmdb_rels = get_tmdb_relations(tmdb_id, m_type, item['Title'])
                                     found_relations.extend(tmdb_rels)
                                 
                                 if found_relations:
-                                    st.markdown("---")
-                                    st.caption("🔗 **Watch Order (Sequel/Prequel):**")
-                                    # Compact Grid of Buttons
-                                    r_cols = st.columns(2)
-                                    for i, rel in enumerate(found_relations):
-                                        with r_cols[i % 2]:
-                                            label = f"↪ {rel['title']}"
-                                            if len(label) > 28: label = label[:26] + ".."
-                                            if st.button(label, key=f"rel_gal_{unique_key}_{i}", help=f"{rel.get('type','Rel')}: {rel['title']}"):
-                                                st.session_state.search_query_trigger = rel['title']
-                                                st.toast(f"Searching for {rel['title']}...")
-                                                time.sleep(1)
-                                                st.rerun() 
-                                    st.markdown("---")
+                                    st.write("")
+                                    st.caption("🔗 **Watch Order:**")
+                                    for rel in found_relations:
+                                        url = f"/?search={urllib.parse.quote(rel['title'])}"
+                                        st.markdown(f"• [{rel['type']}: {rel['title']}]({url})")
+                                    st.write("")
 
                                 # --- 3. TRAILER LOGIC ---
                                 trailer_url = None
