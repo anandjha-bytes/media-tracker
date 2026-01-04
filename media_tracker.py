@@ -274,29 +274,21 @@ def get_tmdb_relations(tmdb_id, media_type):
         if media_type == 'movie':
             movie_api = Movie()
             details = movie_api.details(clean_id)
-            # Check for Collection
+            # Check for Collection (Strict Sequel/Prequel Logic)
             if getattr(details, 'belongs_to_collection', None):
                 col_data = details.belongs_to_collection
                 if 'id' in col_data:
                     col_api = Collection()
                     col_details = col_api.details(col_data['id'])
                     parts = getattr(col_details, 'parts', [])
-                    # Sort by release date
+                    # Sort by release date to show order
                     parts.sort(key=lambda x: x.get('release_date', '9999'), reverse=False)
                     for p in parts:
                         if p['id'] != clean_id:
-                            relations.append({"title": p['title'], "type": "Collection", "relation": "Part of Series"})
+                            relations.append({"title": p['title'], "type": "Movie", "relation": "Part of Series"})
         
-        elif media_type == 'tv':
-            # TV shows are harder on TMDB, often seasons are internal. 
-            # We use Recommendations as a proxy for 'Related Shows'
-            url = f"https://api.themoviedb.org/3/tv/{clean_id}/recommendations?api_key={TMDB_API_KEY}&language=en-US&page=1"
-            r = requests.get(url)
-            if r.status_code == 200:
-                recs = r.json().get('results', [])[:4] # Top 4 recommendations
-                for rec in recs:
-                     relations.append({"title": rec['name'], "type": "TV", "relation": "Related/Similar"})
-
+        # REMOVED TV RECOMMENDATIONS (Often just similar shows, not direct sequels)
+        
     except: pass
     return relations
 
@@ -710,38 +702,37 @@ if tab == "Search & Add":
                     with st.popover("📜 Overview"):
                         st.write(item['Overview'])
                         
-                        # --- RELATIONS / SEQUELS SECTION ---
-                        with st.expander("🔗 Watch Order / Related", expanded=True):
-                            found_relations = []
-                            # 1. Anime/Donghua (AniList Relations)
-                            if item['Type'] in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
-                                ad = fetch_anilist_data_single(item['Title'], "ANIME" if item['Type'] in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
-                                if ad and 'relations' in ad:
-                                    for edge in ad['relations']['edges']:
-                                        rtype = edge['relationType'].replace("_", " ").title()
-                                        rtitle = edge['node']['title']['english'] or edge['node']['title']['romaji']
-                                        if rtitle:
-                                            found_relations.append({"type": rtype, "title": rtitle})
-                            
-                            # 2. TMDB Relations (Collection/Recommendations)
-                            elif item.get('ID'):
-                                m_type = 'movie' if item['Type'] == "Movies" else 'tv'
-                                tmdb_rels = get_tmdb_relations(item['ID'], m_type)
-                                found_relations.extend(tmdb_rels)
-                            
-                            # DISPLAY LINKS
-                            if found_relations:
-                                for i, rel in enumerate(found_relations):
-                                    col_rel_btn, col_rel_txt = st.columns([1, 3])
-                                    with col_rel_txt:
-                                        st.caption(f"**{rel.get('relation', rel.get('type', 'Related'))}:** {rel['title']}")
-                                    with col_rel_btn:
-                                        # When clicked, set trigger and rerun to search for this item
-                                        if st.button("🔎 Jump", key=f"rel_{idx}_{i}"):
-                                            st.session_state.search_query_trigger = rel['title']
-                                            st.rerun()
-                            else:
-                                st.caption("No direct sequels/prequels found.")
+                        # --- NEW COMPACT RELATIONS (Search Tab) ---
+                        found_relations = []
+                        if item['Type'] in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
+                            ad = fetch_anilist_data_single(item['Title'], "ANIME" if item['Type'] in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
+                            if ad and 'relations' in ad:
+                                for edge in ad['relations']['edges']:
+                                    # STRICT FILTER: Only allow Sequel/Prequel
+                                    rtype_raw = edge['relationType']
+                                    if rtype_raw not in ["SEQUEL", "PREQUEL"]: continue 
+                                    
+                                    rtype = rtype_raw.replace("_", " ").title()
+                                    rtitle = edge['node']['title']['english'] or edge['node']['title']['romaji']
+                                    if rtitle: found_relations.append({"type": rtype, "title": rtitle})
+                        elif item.get('ID'):
+                            m_type = 'movie' if item['Type'] == "Movies" else 'tv'
+                            tmdb_rels = get_tmdb_relations(item['ID'], m_type)
+                            found_relations.extend(tmdb_rels)
+                        
+                        if found_relations:
+                            st.markdown("---")
+                            st.caption("🔗 **Watch Order (Sequel/Prequel):**")
+                            # Compact Grid of Buttons
+                            r_cols = st.columns(2)
+                            for i, rel in enumerate(found_relations):
+                                with r_cols[i % 2]:
+                                    label = f"↪ {rel['title']}"
+                                    if len(label) > 28: label = label[:26] + ".."
+                                    if st.button(label, key=f"rel_srch_{idx}_{i}", help=f"{rel.get('type','Rel')}: {rel['title']}"):
+                                        st.session_state.search_query_trigger = rel['title']
+                                        st.rerun()
+                            st.markdown("---")
 
                         if item['Type'] in ["Manga", "Manhwa", "Manhua", "Novel"] and item.get('Links'):
                             st.write("**Official Sources:**")
@@ -885,37 +876,40 @@ elif tab == "My Gallery":
                                 if not tmdb_id and item['Type'] in ["Movies", "Web Series", "K-Drama"]: 
                                     tmdb_id = recover_tmdb_id(item['Title'], m_type)
 
-                                # --- 2. RELATIONS SECTION ---
-                                with st.expander("🔗 Watch Order / Related", expanded=True):
-                                    found_relations = []
-                                    # Anime/Donghua (AniList)
-                                    if item['Type'] in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
-                                        ad = fetch_anilist_data_single(item['Title'], "ANIME" if item['Type'] in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
-                                        if ad and 'relations' in ad:
-                                            for edge in ad['relations']['edges']:
-                                                rtype = edge['relationType'].replace("_", " ").title()
-                                                rtitle = edge['node']['title']['english'] or edge['node']['title']['romaji']
-                                                if rtitle:
-                                                    found_relations.append({"type": rtype, "title": rtitle})
-                                    # TMDB
-                                    elif tmdb_id:
-                                        tmdb_rels = get_tmdb_relations(tmdb_id, m_type)
-                                        found_relations.extend(tmdb_rels)
-                                    
-                                    if found_relations:
-                                        for i, rel in enumerate(found_relations):
-                                            col_rel_btn, col_rel_txt = st.columns([1, 3])
-                                            with col_rel_txt:
-                                                st.caption(f"**{rel.get('relation', rel.get('type', 'Related'))}:** {rel['title']}")
-                                            with col_rel_btn:
-                                                if st.button("🔎 Jump", key=f"rel_gal_{unique_key}_{i}"):
-                                                    st.session_state.search_query_trigger = rel['title']
-                                                    # We need to switch tabs to search to show result
-                                                    st.toast(f"Searching for {rel['title']}...")
-                                                    time.sleep(1)
-                                                    st.rerun() # In real app, might need to manually set tab logic, but this triggers search state
-                                    else:
-                                        st.caption("No direct sequels/prequels found.")
+                                # --- 2. NEW COMPACT RELATIONS (Gallery Tab) ---
+                                found_relations = []
+                                # Anime/Donghua (AniList)
+                                if item['Type'] in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
+                                    ad = fetch_anilist_data_single(item['Title'], "ANIME" if item['Type'] in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
+                                    if ad and 'relations' in ad:
+                                        for edge in ad['relations']['edges']:
+                                            # STRICT FILTER: Only allow Sequel/Prequel
+                                            rtype_raw = edge['relationType']
+                                            if rtype_raw not in ["SEQUEL", "PREQUEL"]: continue
+
+                                            rtype = rtype_raw.replace("_", " ").title()
+                                            rtitle = edge['node']['title']['english'] or edge['node']['title']['romaji']
+                                            if rtitle: found_relations.append({"type": rtype, "title": rtitle})
+                                # TMDB
+                                elif tmdb_id:
+                                    tmdb_rels = get_tmdb_relations(tmdb_id, m_type)
+                                    found_relations.extend(tmdb_rels)
+                                
+                                if found_relations:
+                                    st.markdown("---")
+                                    st.caption("🔗 **Watch Order (Sequel/Prequel):**")
+                                    # Compact Grid of Buttons
+                                    r_cols = st.columns(2)
+                                    for i, rel in enumerate(found_relations):
+                                        with r_cols[i % 2]:
+                                            label = f"↪ {rel['title']}"
+                                            if len(label) > 28: label = label[:26] + ".."
+                                            if st.button(label, key=f"rel_gal_{unique_key}_{i}", help=f"{rel.get('type','Rel')}: {rel['title']}"):
+                                                st.session_state.search_query_trigger = rel['title']
+                                                st.toast(f"Searching for {rel['title']}...")
+                                                time.sleep(1)
+                                                st.rerun() 
+                                    st.markdown("---")
 
                                 # --- 3. TRAILER LOGIC ---
                                 trailer_url = None
