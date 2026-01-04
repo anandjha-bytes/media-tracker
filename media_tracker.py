@@ -10,9 +10,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="📚")
+
+# --- HIDE STREAMLIT HEADER (Share, Star, Fork, etc.) ---
+st.markdown("""
+    <style>
+        .stAppDeployButton {display:none;}
+        header {visibility: hidden;}
+        #MainMenu {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("🎬 Ultimate Media Tracker")
 
-# --- TRY IMPORTING SORTABLES ---
+# --- IMPORT SORTABLES (FORCE IMPORT) ---
+# This forces the app to crash if the library is missing, ensuring we know if it's not installed.
 from streamlit_sortables import sort_items
 HAS_SORTABLES = True
 
@@ -887,6 +898,3 @@ elif tab == "My Gallery":
                 st.info("No items found matching filters.")
     else:
         st.error("Connection Failed. Check Secrets.")
-
-
-
