@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="📚")
-st.title("🎬 TRACKER V2 - DEBUG MODE")
+st.title("🎬 Ultimate Media Tracker")
 
 # --- TRY IMPORTING SORTABLES ---
 from streamlit_sortables import sort_items
@@ -887,5 +887,6 @@ elif tab == "My Gallery":
                 st.info("No items found matching filters.")
     else:
         st.error("Connection Failed. Check Secrets.")
+
 
 
