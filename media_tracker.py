@@ -78,7 +78,7 @@ def get_tmdb_countries():
 
 tmdb_countries = get_tmdb_countries()
 
-# --- GOOGLE SHEETS CONNECTION (With Resize Safety) ---
+# --- GOOGLE SHEETS CONNECTION ---
 def get_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = None
@@ -600,16 +600,21 @@ def search_unified(query, selected_types, selected_genres, sort_option, page=1):
 
     return results_data
 
+
 # --- UI START ---
 if "refresh_key" not in st.session_state: st.session_state.refresh_key = 0
 if 'search_results' not in st.session_state: st.session_state.search_results = []
 if 'search_page' not in st.session_state: st.session_state.search_page = 1
 if 'search_query_trigger' not in st.session_state: st.session_state.search_query_trigger = ""
 
-tab = st.sidebar.radio("Menu", ["My Gallery", "Search & Add"], key="main_nav")
+# --- HORIZONTAL NAVIGATION MENU (MOBILE FRIENDLY) ---
+# Checks if we just clicked a sequel link to default open the search tab
+default_tab = 1 if st.session_state.search_query_trigger else 0
+tab = st.radio("Navigation", ["🏠 My Library", "🔍 Search & Add"], horizontal=True, label_visibility="collapsed", index=default_tab)
+st.write("---")
 
 # --- SEARCH TAB ---
-if tab == "Search & Add":
+if tab == "🔍 Search & Add":
     st.subheader("Global Database Search")
     
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
@@ -657,11 +662,16 @@ if tab == "Search & Add":
                     st.caption(f"🏷️ {item.get('Genres', '')}")
                     
                     with st.popover("📜 Overview"):
+                        # Define these BEFORE they are used to prevent NameError crash
+                        tmdb_id = item.get('ID')
+                        m_type = 'movie' if item.get('Type') == "Movies" else 'tv'
+                        
                         st.write(item.get('Overview', ''))
                         
+                        # --- SEQUELS / PREQUELS INLINE TEXT ---
                         found_relations = []
                         if item.get('Type') in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
-                            ad = fetch_anilist_data_single(item['Title'], "ANIME" if item['Type'] in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
+                            ad = fetch_anilist_data_single(item.get('Title', ''), "ANIME" if item.get('Type') in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
                             if ad and 'relations' in ad:
                                 for edge in ad['relations']['edges']:
                                     rtype_raw = edge['relationType']
@@ -670,18 +680,37 @@ if tab == "Search & Add":
                                     rtype = rtype_raw.replace("_", " ").title()
                                     rtitle = edge['node']['title']['english'] or edge['node']['title']['romaji']
                                     if rtitle: found_relations.append({"type": rtype, "title": rtitle})
-                        elif item.get('ID'):
-                            m_type = 'movie' if item.get('Type') == "Movies" else 'tv'
-                            tmdb_rels = get_tmdb_relations(item['ID'], m_type, item.get('Title', ''))
+                        elif tmdb_id:
+                            tmdb_rels = get_tmdb_relations(tmdb_id, m_type, item.get('Title', ''))
                             found_relations.extend(tmdb_rels)
                         
                         if found_relations:
-                            st.write("")
-                            st.caption("🔗 **Watch Order:**")
+                            st.write("---")
+                            links = []
                             for rel in found_relations:
                                 url = f"/?search={urllib.parse.quote(rel['title'])}"
-                                st.markdown(f"• [{rel['type']}: {rel['title']}]({url})")
-                            st.write("")
+                                links.append(f"[{rel['type']}: {rel['title']}]({url})")
+                            
+                            # Matches your red drawn box style exactly
+                            st.markdown(f"**Watch Order:** {' | '.join(links)}")
+                            st.write("---")
+
+                        # --- TRAILER LOGIC ---
+                        trailer_url = None
+                        try:
+                            if item.get('Type') in ["Anime", "Donghua"]:
+                                 ad = fetch_anilist_data_single(item.get('Title', ''), "ANIME")
+                                 if ad and 'trailer' in ad and ad['trailer'] and ad['trailer']['site'] == 'youtube':
+                                      trailer_url = f"https://www.youtube.com/watch?v={ad['trailer']['id']}"
+                            elif item.get('Type') in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Vertical Drama"]:
+                                 if tmdb_id: # Prevents the NameError Crash
+                                     trailer_url = get_tmdb_trailer(tmdb_id, m_type)
+                        except Exception:
+                            trailer_url = None
+
+                        if trailer_url:
+                            st.caption("🎬 Trailer")
+                            st.video(trailer_url)
 
                         if item.get('Type') in ["Manga", "Manhwa", "Manhua", "Novel"] and item.get('Links'):
                             st.write("**Official Sources:**")
@@ -691,7 +720,7 @@ if tab == "Search & Add":
                     is_added = item.get('Title', '').strip() in lib_map
                     
                     if is_added:
-                        existing_data = lib_map[item['Title'].strip()]
+                        existing_data = lib_map[item.get('Title', '').strip()]
                         st.success("✅ In Collection")
                         
                         with st.expander("Update Status", expanded=False):
@@ -720,11 +749,11 @@ if tab == "Search & Add":
                             c1, c2 = st.columns(2)
                             with c1:
                                 if st.button("Save", key=f"save_search_{idx}"):
-                                    update_status_in_sheet(item['Title'], new_s, ns, ne)
+                                    update_status_in_sheet(item.get('Title', ''), new_s, ns, ne)
                                     st.rerun()
                             with c2:
                                 if st.button("Delete", key=f"del_search_{idx}"):
-                                    delete_from_sheet(item['Title'])
+                                    delete_from_sheet(item.get('Title', ''))
                                     st.rerun()
 
                     else:
@@ -742,7 +771,7 @@ if tab == "Search & Add":
                 st.rerun()
 
 # --- GALLERY TAB ---
-elif tab == "My Gallery":
+elif tab == "🏠 My Library":
     
     col_h, col_c = st.columns([3, 1])
     with col_h: st.subheader("My Library")
@@ -813,15 +842,19 @@ elif tab == "My Gallery":
                             if not img.startswith("http"): img = "https://via.placeholder.com/300x450?text=No+Image"
                             st.image(img, use_container_width=True)
                             
-                            st.markdown(f"**{item['Title']}**")
+                            st.markdown(f"**{item.get('Title', '')}**")
                             unique_key = f"gal_{index}"
                             
                             with st.popover("📜 Overview"):
+                                # Define these BEFORE they are used to prevent NameError crash
                                 tmdb_id = item.get('ID')
                                 m_type = 'movie' if item.get('Type') == "Movies" else 'tv'
                                 if not tmdb_id and item.get('Type') in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Vertical Drama"]: 
                                     tmdb_id = recover_tmdb_id(item.get('Title', ''), m_type)
 
+                                st.write(item.get('Overview', ''))
+
+                                # --- SEQUELS / PREQUELS INLINE TEXT ---
                                 found_relations = []
                                 if item.get('Type') in ["Anime", "Donghua", "Manga", "Manhwa", "Manhua", "Novel"]:
                                     ad = fetch_anilist_data_single(item.get('Title', ''), "ANIME" if item.get('Type') in ["Anime", "Donghua"] else "MANGA", fetch_relations=True)
@@ -838,13 +871,16 @@ elif tab == "My Gallery":
                                     found_relations.extend(tmdb_rels)
                                 
                                 if found_relations:
-                                    st.write("")
-                                    st.caption("🔗 **Watch Order:**")
+                                    st.write("---")
+                                    links = []
                                     for rel in found_relations:
                                         url = f"/?search={urllib.parse.quote(rel['title'])}"
-                                        st.markdown(f"• [{rel['type']}: {rel['title']}]({url})")
-                                    st.write("")
+                                        links.append(f"[{rel['type']}: {rel['title']}]({url})")
+                                        
+                                    st.markdown(f"**Watch Order:** {' | '.join(links)}")
+                                    st.write("---")
 
+                                # --- TRAILER LOGIC ---
                                 trailer_url = None
                                 try:
                                     if item.get('Type') in ["Anime", "Donghua"]:
@@ -852,7 +888,8 @@ elif tab == "My Gallery":
                                          if ad and 'trailer' in ad and ad['trailer'] and ad['trailer']['site'] == 'youtube':
                                               trailer_url = f"https://www.youtube.com/watch?v={ad['trailer']['id']}"
                                     elif item.get('Type') in ["Movies", "Web Series", "K-Drama", "C-Drama", "Thai Drama", "Vertical Drama"]:
-                                         trailer_url = get_tmdb_trailer(tmdb_id, m_type)
+                                         if tmdb_id: # Prevents the NameError Crash
+                                             trailer_url = get_tmdb_trailer(tmdb_id, m_type)
                                 except Exception:
                                     trailer_url = None
 
@@ -862,7 +899,6 @@ elif tab == "My Gallery":
 
                                 st.write(f"**Status:** {item.get('Status', '')}")
                                 st.write(f"**Rating:** {item.get('Rating', '')}")
-                                st.caption(item.get('Overview', ''))
                                 st.divider()
                                 
                                 is_book = item.get('Type') in ["Book", "Novel"]
