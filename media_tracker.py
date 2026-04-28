@@ -985,35 +985,97 @@ def process_tmdb_results_batch(results, media_kind, specific_type, selected_type
 # ─────────────────────────────────────────────────────────────
 # PARALLEL SEARCH ENGINE
 # ─────────────────────────────────────────────────────────────
-# Country codes used in TMDB discover (more accurate than language alone)
+# Genres that make a zh-language show NOT a live-action C-Drama
+_ANIMATION_ID   = 16
+_NON_DRAMA_IDS  = {16, 10764, 10763, 10767}  # Animation, Reality, Game Show, Talk Show
+# These are excluded from discover calls for live-action drama types
+_DRAMA_EXCLUDE_GENRES = "16,10764,10763,10767"
+
+def process_tmdb_results_batch(results, media_kind, specific_type, selected_types, selected_genres, query):
+    LANG_REQUIRED = {
+        "K-Drama": "ko", "C-Drama": "zh", "Thai Drama": "th", "Vertical Drama": "zh"
+    }
+    processed = []
+    for r in results:
+        lang      = getattr(r, "original_language", "en")
+        genre_ids = set(getattr(r, "genre_ids", []))
+
+        # Enforce language match for drama types
+        required_lang = LANG_REQUIRED.get(specific_type)
+        if required_lang and lang != required_lang:
+            continue
+
+        res_genres = [ID_TO_GENRE.get(gid, "Unknown") for gid in genre_ids]
+
+        if selected_genres and not any(g in res_genres for g in selected_genres):
+            continue
+
+        # Type detection — animated zh shows → Donghua, not C-Drama
+        if media_kind == "Movie":
+            detected_type = "Movies"
+        elif lang == "zh":
+            if _ANIMATION_ID in genre_ids:
+                detected_type = "Donghua"
+            elif genre_ids & _NON_DRAMA_IDS:
+                continue  # variety / reality / talk — skip entirely for zh live-action search
+            elif specific_type == "Vertical Drama":
+                detected_type = "Vertical Drama"
+            else:
+                detected_type = "C-Drama"
+        elif lang == "ko": detected_type = "K-Drama"
+        elif lang == "th": detected_type = "Thai Drama"
+        elif lang == "ja": detected_type = "Anime"
+        else:              detected_type = "Web Series"
+
+        if detected_type not in selected_types:
+            continue
+
+        poster = getattr(r, "poster_path", None)
+        processed.append({
+            "Title":    getattr(r, "title", getattr(r, "name", "Unknown")),
+            "Type":     detected_type,
+            "Country":  lang,
+            "Genres":   ", ".join(res_genres),
+            "Image":    f"{tmdb_poster_base}{poster}" if poster else "",
+            "Overview": getattr(r, "overview", "No overview."),
+            "Rating":   f"{getattr(r, 'vote_average', 0)}/10",
+            "Backdrop": f"{tmdb_backdrop_base}{getattr(r, 'backdrop_path', '')}",
+            "Total_Eps": "?",
+            "ID":       getattr(r, "id", None),
+        })
+    return processed
+
+
+# ─────────────────────────────────────────────────────────────
+# PARALLEL SEARCH ENGINE
+# ─────────────────────────────────────────────────────────────
 ORIGIN_COUNTRY = {
     "K-Drama": "KR", "C-Drama": "CN", "Thai Drama": "TH", "Vertical Drama": "CN",
 }
 
 def search_unified(query, selected_types, selected_genres, sort_option, page=1):
     results_data, futures = [], []
-    live_action = ["Movies","Web Series","K-Drama","C-Drama","Thai Drama","Vertical Drama"]
 
     tmdb_genres = [g for g in selected_genres if g in TMDB_GENRE_MAP]
     g_ids = "|".join(str(TMDB_GENRE_MAP[g]) for g in tmdb_genres)
     tmdb_sort = "vote_average.desc" if sort_option == "Top Rated" else "popularity.desc"
 
     def run_tmdb_job(media_kind, specific_type, lang_filter=None):
-        # Create per-thread instances — tmdbv3api objects are NOT thread-safe
-        discover   = Discover()
+        discover   = Discover()   # per-thread — tmdbv3api is NOT thread-safe
         search_api = Search()
         try:
             if query:
-                # Search by title; post-filter by language is done in process_tmdb_results_batch
                 raw = (search_api.movies(query, page=page) if media_kind == "Movie"
                        else search_api.tv_shows(query, page=page))
             else:
                 kwargs = {"sort_by": tmdb_sort, "page": page, "vote_count.gte": 10}
-                if g_ids:       kwargs["with_genres"] = g_ids
+                if g_ids:       kwargs["with_genres"]           = g_ids
                 if lang_filter: kwargs["with_original_language"] = lang_filter
-                # Use origin country for drama types — more precise than language alone
                 origin = ORIGIN_COUNTRY.get(specific_type)
-                if origin:     kwargs["with_origin_country"] = origin
+                if origin:      kwargs["with_origin_country"]   = origin
+                # Exclude animation/reality/variety from live-action drama discovery
+                if specific_type in ("C-Drama", "K-Drama", "Thai Drama", "Vertical Drama", "Web Series"):
+                    kwargs["without_genres"] = _DRAMA_EXCLUDE_GENRES
                 raw = (discover.discover_movies(kwargs) if media_kind == "Movie"
                        else discover.discover_tv_shows(kwargs))
             return process_tmdb_results_batch(raw, media_kind, specific_type, selected_types, selected_genres, query)
