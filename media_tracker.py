@@ -143,6 +143,8 @@ def _ensure_headers(sheet):
             sheet.resize(cols=len(REQUIRED_HEADERS))
             sheet.append_row(REQUIRED_HEADERS)
         elif missing:
+            new_col_count = len(existing) + len(missing)
+            sheet.resize(cols=new_col_count)  # expand grid BEFORE writing
             updates = []
             for h in missing:
                 col_pos = len(existing) + 1
