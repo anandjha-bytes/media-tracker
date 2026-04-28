@@ -16,20 +16,341 @@ from tmdbv3api import TMDb, Movie, TV, Search, Discover, Collection
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="📚")
+st.set_page_config(page_title="Ultimate Media Tracker", layout="wide", page_icon="🎬")
+
 st.markdown("""
-    <style>
-        .stAppDeployButton {display:none;}
-        header {visibility: hidden;}
-        #MainMenu {visibility: hidden;}
-    </style>
+<style>
+/* ═══════════════════════════════════════════
+   BASE & BACKGROUND
+═══════════════════════════════════════════ */
+.stAppDeployButton, header, #MainMenu { display: none !important; visibility: hidden !important; }
+
+[data-testid="stAppViewContainer"] {
+    background: #0d0d14;
+    color: #e8e8f0;
+}
+[data-testid="stSidebar"] { background: #0d0d14; }
+[data-testid="block-container"] {
+    padding-top: 1.5rem;
+    padding-bottom: 3rem;
+    max-width: 1400px;
+}
+
+/* ═══════════════════════════════════════════
+   TYPOGRAPHY
+═══════════════════════════════════════════ */
+html, body, [class*="css"] {
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    color: #e8e8f0;
+}
+h1, h2, h3 { letter-spacing: -0.02em; }
+
+/* App title */
+[data-testid="stMarkdownContainer"] h1 {
+    font-size: 2rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #e8e8f0 30%, #a78bfa 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0;
+}
+
+/* ═══════════════════════════════════════════
+   NAV RADIO (tab switcher)
+═══════════════════════════════════════════ */
+[data-testid="stHorizontalBlock"]:has([data-testid="stRadio"]) {
+    background: #16161f;
+    border: 1px solid #2a2a3a;
+    border-radius: 14px;
+    padding: 6px;
+    display: inline-flex;
+    gap: 4px;
+    margin-bottom: 0.5rem;
+}
+[data-testid="stRadio"] > div {
+    display: flex;
+    gap: 4px;
+    flex-direction: row !important;
+}
+[data-testid="stRadio"] label {
+    padding: 8px 22px !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 0.88rem !important;
+    color: #888 !important;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: none !important;
+    background: transparent !important;
+}
+[data-testid="stRadio"] label:has(input:checked) {
+    background: linear-gradient(135deg, #7c3aed, #a78bfa) !important;
+    color: #fff !important;
+    box-shadow: 0 4px 15px rgba(124,58,237,0.4);
+}
+
+/* ═══════════════════════════════════════════
+   INPUTS & CONTROLS
+═══════════════════════════════════════════ */
+[data-testid="stTextInput"] input,
+[data-testid="stSelectbox"] > div > div,
+[data-baseweb="select"] > div {
+    background: #1a1a28 !important;
+    border: 1px solid #2e2e45 !important;
+    border-radius: 10px !important;
+    color: #e8e8f0 !important;
+    transition: border-color 0.2s;
+}
+[data-testid="stTextInput"] input:focus,
+[data-baseweb="select"] > div:focus-within {
+    border-color: #7c3aed !important;
+    box-shadow: 0 0 0 3px rgba(124,58,237,0.15) !important;
+}
+[data-testid="stMultiSelect"] [data-baseweb="tag"] {
+    background: #7c3aed !important;
+    border-radius: 6px !important;
+    font-size: 0.78rem !important;
+}
+
+/* ═══════════════════════════════════════════
+   BUTTONS
+═══════════════════════════════════════════ */
+[data-testid="stButton"] > button {
+    background: linear-gradient(135deg, #7c3aed, #a855f7) !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+    padding: 0.45rem 1.1rem !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 4px 12px rgba(124,58,237,0.25) !important;
+}
+[data-testid="stButton"] > button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 8px 20px rgba(124,58,237,0.4) !important;
+}
+[data-testid="stButton"] > button:active {
+    transform: translateY(0) !important;
+}
+/* Danger (Delete) button — second button in a 2-col layout */
+[data-testid="stButton"]:last-child > button {
+    background: linear-gradient(135deg, #7f1d1d, #dc2626) !important;
+    box-shadow: 0 4px 12px rgba(220,38,38,0.25) !important;
+}
+[data-testid="stButton"]:last-child > button:hover {
+    box-shadow: 0 8px 20px rgba(220,38,38,0.4) !important;
+}
+
+/* Link buttons */
+[data-testid="stLinkButton"] > a {
+    background: #1e1e2e !important;
+    border: 1px solid #3b3b55 !important;
+    border-radius: 9px !important;
+    color: #a78bfa !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
+}
+[data-testid="stLinkButton"] > a:hover {
+    background: #2a2a3f !important;
+    border-color: #7c3aed !important;
+    transform: translateY(-1px) !important;
+}
+
+/* Download button */
+[data-testid="stDownloadButton"] > button {
+    background: #1e1e2e !important;
+    border: 1px solid #3b3b55 !important;
+    color: #a78bfa !important;
+    box-shadow: none !important;
+}
+[data-testid="stDownloadButton"] > button:hover {
+    border-color: #7c3aed !important;
+    background: #252535 !important;
+}
+
+/* ═══════════════════════════════════════════
+   EXPANDERS
+═══════════════════════════════════════════ */
+[data-testid="stExpander"] {
+    background: #13131e !important;
+    border: 1px solid #22223a !important;
+    border-radius: 14px !important;
+    overflow: hidden;
+    margin-bottom: 0.75rem;
+}
+[data-testid="stExpander"] summary {
+    font-weight: 600 !important;
+    font-size: 0.9rem !important;
+    color: #c4c4d8 !important;
+    padding: 0.75rem 1rem !important;
+}
+[data-testid="stExpander"] summary:hover {
+    color: #e8e8f0 !important;
+}
+[data-testid="stExpander"] > div > div {
+    padding: 0 1rem 1rem 1rem !important;
+}
+
+/* ═══════════════════════════════════════════
+   GALLERY CARDS
+   Wrap each image in a hover-lift card
+═══════════════════════════════════════════ */
+[data-testid="stImage"] {
+    border-radius: 12px !important;
+    overflow: hidden !important;
+    transition: transform 0.25s ease, box-shadow 0.25s ease !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important;
+    display: block !important;
+}
+[data-testid="stImage"]:hover {
+    transform: translateY(-4px) scale(1.02) !important;
+    box-shadow: 0 12px 35px rgba(124,58,237,0.3) !important;
+}
+[data-testid="stImage"] img {
+    border-radius: 12px !important;
+    object-fit: cover !important;
+}
+
+/* ═══════════════════════════════════════════
+   POPOVERS
+═══════════════════════════════════════════ */
+[data-testid="stPopover"] > button {
+    background: #1a1a2a !important;
+    border: 1px solid #2e2e45 !important;
+    border-radius: 9px !important;
+    color: #a78bfa !important;
+    font-size: 0.82rem !important;
+    padding: 0.35rem 0.8rem !important;
+    font-weight: 500 !important;
+    width: 100% !important;
+    transition: all 0.2s !important;
+}
+[data-testid="stPopover"] > button:hover {
+    border-color: #7c3aed !important;
+    background: #22223a !important;
+}
+[data-testid="stPopover"] > div {
+    background: #16161f !important;
+    border: 1px solid #2e2e45 !important;
+    border-radius: 14px !important;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.7) !important;
+    padding: 1rem !important;
+}
+
+/* ═══════════════════════════════════════════
+   ALERTS / TOASTS
+═══════════════════════════════════════════ */
+[data-testid="stSuccess"] {
+    background: #0d2218 !important;
+    border: 1px solid #166534 !important;
+    border-radius: 10px !important;
+    color: #4ade80 !important;
+}
+[data-testid="stInfo"] {
+    background: #0f1a2e !important;
+    border: 1px solid #1e3a5f !important;
+    border-radius: 10px !important;
+    color: #60a5fa !important;
+}
+[data-testid="stWarning"] {
+    background: #1c1507 !important;
+    border: 1px solid #92400e !important;
+    border-radius: 10px !important;
+}
+[data-testid="stError"] {
+    background: #1c0a0a !important;
+    border: 1px solid #7f1d1d !important;
+    border-radius: 10px !important;
+}
+
+/* ═══════════════════════════════════════════
+   SLIDERS & NUMBER INPUTS
+═══════════════════════════════════════════ */
+[data-testid="stSlider"] > div > div > div {
+    background: #7c3aed !important;
+}
+[data-testid="stNumberInput"] input {
+    background: #1a1a28 !important;
+    border: 1px solid #2e2e45 !important;
+    border-radius: 8px !important;
+    color: #e8e8f0 !important;
+}
+
+/* ═══════════════════════════════════════════
+   CHECKBOX & SELECTBOX
+═══════════════════════════════════════════ */
+[data-testid="stCheckbox"] label {
+    color: #c4c4d8 !important;
+    font-size: 0.88rem !important;
+}
+[data-testid="stCheckbox"] input:checked + div {
+    background: #7c3aed !important;
+    border-color: #7c3aed !important;
+}
+
+/* ═══════════════════════════════════════════
+   TEXT AREA
+═══════════════════════════════════════════ */
+[data-testid="stTextArea"] textarea {
+    background: #1a1a28 !important;
+    border: 1px solid #2e2e45 !important;
+    border-radius: 10px !important;
+    color: #e8e8f0 !important;
+    font-size: 0.85rem !important;
+}
+[data-testid="stTextArea"] textarea:focus {
+    border-color: #7c3aed !important;
+    box-shadow: 0 0 0 3px rgba(124,58,237,0.15) !important;
+}
+
+/* ═══════════════════════════════════════════
+   DIVIDERS
+═══════════════════════════════════════════ */
+hr {
+    border: none !important;
+    border-top: 1px solid #1e1e2e !important;
+    margin: 1rem 0 !important;
+}
+
+/* ═══════════════════════════════════════════
+   SCROLLBAR
+═══════════════════════════════════════════ */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0d0d14; }
+::-webkit-scrollbar-thumb { background: #2e2e45; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #7c3aed; }
+
+/* ═══════════════════════════════════════════
+   CAPTION & SMALL TEXT
+═══════════════════════════════════════════ */
+[data-testid="stCaptionContainer"] {
+    color: #888 !important;
+    font-size: 0.78rem !important;
+}
+small, .small { color: #888 !important; }
+
+/* ═══════════════════════════════════════════
+   SEARCH RESULT ROWS
+═══════════════════════════════════════════ */
+[data-testid="stHorizontalBlock"] {
+    gap: 1rem;
+}
+
+/* Currently Active strip - images should be tighter */
+.active-strip [data-testid="stImage"] {
+    border-radius: 10px !important;
+}
+</style>
 """, unsafe_allow_html=True)
 
 if "search" in st.query_params:
     st.session_state.search_query_trigger = st.query_params["search"]
     st.query_params.clear()
 
-st.title("🎬 Ultimate Media Tracker")
+st.markdown("# 🎬 Ultimate Media Tracker")
 
 try:
     from streamlit_sortables import sort_items
@@ -744,14 +1065,23 @@ for k, v in [("search_results", []), ("search_page", 1),
 default_tab = 1 if st.session_state.search_query_trigger else 0
 tab = st.radio("Navigation", ["🏠 My Library", "🔍 Search & Add"],
                horizontal=True, label_visibility="collapsed", index=default_tab)
-st.write("---")
+st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────
 # SEARCH TAB
 # ─────────────────────────────────────────────────────────────
 if tab == "🔍 Search & Add":
-    st.subheader("Global Database Search")
+    st.markdown("""
+    <div style='margin-bottom:1.25rem'>
+        <h2 style='font-size:1.4rem;font-weight:700;color:#e8e8f0;margin:0'>
+            🔍 Global Database Search
+        </h2>
+        <p style='color:#666;font-size:0.85rem;margin:0.25rem 0 0'>
+            Movies · Series · Anime · Manga · Books — all in one place
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
 
     default_q = ""
@@ -893,7 +1223,11 @@ if tab == "🔍 Search & Add":
 # ─────────────────────────────────────────────────────────────
 elif tab == "🏠 My Library":
     col_h, col_c = st.columns([3, 1])
-    with col_h: st.subheader("My Library")
+    with col_h:
+        st.markdown("""
+        <h2 style='font-size:1.4rem;font-weight:700;color:#e8e8f0;margin:0 0 0.5rem'>
+            🏠 My Library
+        </h2>""", unsafe_allow_html=True)
     with col_c:
         try: def_ix = list(tmdb_countries.keys()).index("India")
         except ValueError: def_ix = 0
@@ -991,7 +1325,31 @@ elif tab == "🏠 My Library":
                     st.image(img, use_container_width=True)
 
                     fav_badge = "❤️ " if item.get("Favorite") == "Yes" else ""
-                    st.markdown(f"**{fav_badge}{item.get('Title','')}**")
+                    status = item.get("Status", "")
+                    status_colors = {
+                        "Watching":      ("#7c3aed", "#e9d5ff"),
+                        "Reading":       ("#7c3aed", "#e9d5ff"),
+                        "Completed":     ("#065f46", "#6ee7b7"),
+                        "Dropped":       ("#7f1d1d", "#fca5a5"),
+                        "Plan to Watch": ("#1e3a5f", "#93c5fd"),
+                        "Plan to Read":  ("#1e3a5f", "#93c5fd"),
+                    }
+                    bg, fg = status_colors.get(status, ("#222", "#aaa"))
+                    title_text = item.get('Title', '')
+                    short_title = (title_text[:22] + "…") if len(title_text) > 22 else title_text
+                    st.markdown(f"""
+                    <div style='margin:6px 0 2px'>
+                        <div style='font-size:0.82rem;font-weight:700;color:#e8e8f0;
+                                    line-height:1.3;margin-bottom:4px' title='{title_text}'>
+                            {fav_badge}{short_title}
+                        </div>
+                        <span style='background:{bg};color:{fg};font-size:0.68rem;
+                                     font-weight:600;padding:2px 7px;border-radius:20px;
+                                     letter-spacing:0.02em;white-space:nowrap'>
+                            {status}
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
                     uk = f"gal_{index}"
 
                     # Must be defined BEFORE any popover/expander that uses them
